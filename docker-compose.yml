@@ -1,0 +1,29 @@
+services:
+  canlogger:
+    build: .
+    container_name: canlogger-app
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./config:/app/config
+      - ./data:/data
+    depends_on:
+      - postgres
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15
+    container_name: canlogger-postgres
+    environment:
+      POSTGRES_DB: canlogger
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql:ro
+    restart: unless-stopped
+
+volumes:
+  pg_data:

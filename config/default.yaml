@@ -1,0 +1,37 @@
+api_host: 0.0.0.0
+api_port: 8000
+mode: simulator
+
+stream:
+  sample_rate_hz: 5000000
+  window_ms: 10
+  cadence_ms: 10
+  channels_per_scope: 1
+
+storage:
+  spool_dir: /data/spool
+  enable_postgres_upload: false
+  postgres_dsn: postgresql://postgres:postgres@postgres:5432/canlogger
+  upload_batch_windows: 100
+
+devices:
+  - bus_name: CAN_BUS_1
+    serial: PICO-2204A-001
+    channel: A
+    enabled: true
+  - bus_name: CAN_BUS_2
+    serial: PICO-2204A-002
+    channel: A
+    enabled: true
+  - bus_name: CAN_BUS_3
+    serial: PICO-2204A-003
+    channel: A
+    enabled: true
+  - bus_name: CAN_BUS_4
+    serial: PICO-2204A-004
+    channel: A
+    enabled: true
+  - bus_name: CAN_BUS_5
+    serial: PICO-2204A-005
+    channel: A
+    enabled: true
