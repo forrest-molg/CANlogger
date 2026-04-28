@@ -3,44 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>CANlogger Setup</title>
-    <link rel="stylesheet" href="/assets/styles.css" />
+    <title>CANlogger - Control Panel</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
   </head>
   <body>
-    <main class="shell">
-      <section class="hero">
-        <h1>CANlogger Setup Console</h1>
-        <p>Five-stream CAN waveform capture for PicoScope 2204A with adjustable snapshot timing.</p>
-      </section>
-
-      <section class="panel">
-        <h2>Capture Settings</h2>
-        <div class="grid">
-          <label>
-            Sample Rate (Hz)
-            <input id="sampleRate" type="number" min="100000" max="10000000" step="100000" />
-          </label>
-          <label>
-            Window (ms)
-            <input id="windowMs" type="number" min="1" max="1000" step="1" />
-          </label>
-          <label>
-            Cadence (ms)
-            <input id="cadenceMs" type="number" min="1" max="1000" step="1" />
-          </label>
-        </div>
-        <div class="actions">
-          <button id="saveBtn">Save Config</button>
-          <button id="startBtn" class="primary">Start Capture</button>
-          <button id="stopBtn" class="danger">Stop Capture</button>
-        </div>
-      </section>
-
-      <section class="panel">
-        <h2>Runtime Status</h2>
-        <div id="runtime" class="runtime">Loading...</div>
-      </section>
-    </main>
-    <script src="/assets/app.js"></script>
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
   </body>
 </html>

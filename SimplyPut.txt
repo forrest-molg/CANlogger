@@ -1,0 +1,231 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  CANlogger — Simply Put
+  A plain-English guide to what this app is and how it works
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+WHAT IS THIS APP?
+─────────────────
+You have five oscilloscopes (PicoScope 2204A units) each plugged into a
+different wire in a vehicle's CAN bus network. A CAN bus is essentially
+the nervous system of a vehicle — it is the set of wires that lets all the
+electronic control units (the engine, the brakes, the dashboard, etc.) talk
+to one another.
+
+CANlogger is a program that runs on a mini PC, listens to all five of those
+oscilloscopes at once, and saves a precise electrical picture of each wire —
+thousands of times per second — so that you can study the health and behavior
+of those signals later.
+
+Think of it as a flight recorder, but for the electrical language your vehicle
+speaks.
+
+
+WHAT IS AN OSCILLOSCOPE DOING HERE?
+────────────────────────────────────
+An oscilloscope is an instrument that measures voltage over time — it draws
+the shape of an electrical signal on a screen. Instead of just telling you
+"there is 2.5 volts on this wire," it shows you the exact wave: how fast it
+rises, how fast it falls, whether it is clean or noisy.
+
+The PicoScope 2204A is a small oscilloscope that plugs into a USB port on
+a computer, so the computer can receive and record those wave shapes directly
+as numbers.
+
+CANlogger takes a photograph of each wave every 10 milliseconds (one
+hundredth of a second). Each photograph contains 50,000 individual voltage
+readings packed together. That is what gives us the fine-grained picture we
+need to catch subtle problems in the signal.
+
+
+THE FIVE STREAMS
+────────────────
+Because you have five separate CAN buses (and therefore five separate
+oscilloscopes), CANlogger runs five independent recorders in parallel —
+one for each bus. They all run at the same time without interfering with
+one another, like five film cameras rolling simultaneously on five different
+subjects.
+
+Each recorder keeps a log of:
+
+  • Which bus it is watching
+  • Which oscilloscope it came from
+  • The exact microsecond the snapshot began
+  • Every voltage reading in that snapshot
+
+
+WHERE DOES THE DATA GO?
+────────────────────────
+When each 10-millisecond snapshot is captured, it is first saved to the
+mini PC's own hard drive in a folder called the spool. This is a fast,
+temporary holding area — like an inbox.
+
+From the spool, the data can be forwarded to a PostgreSQL database. A
+database is an organized, searchable filing cabinet for large amounts of
+information. PostgreSQL is a well-respected, free, industrial-strength
+database that runs on the same mini PC (or on a separate server if you
+prefer). When you want to look back at what happened on CAN Bus 3 last
+Tuesday at 2:47 in the morning, you ask the database and it finds it
+instantly.
+
+The reason we do not skip the spool and go straight to the database is
+simple: the database is powerful but relatively slow. The spool accepts
+data at full speed without any hesitation, and the database catches up
+at its own comfortable pace in the background.
+
+
+WHAT IS THE BACKEND?
+─────────────────────
+The backend is the engine room of the app — the part that does all the real
+work but has no visible face. You never see it directly; it just runs quietly
+in the background.
+
+In practical terms it is a Python program. Python is a popular programming
+language known for being readable and approachable. The backend:
+
+  1. Talks to the oscilloscopes and pulls data from them
+  2. Manages the five parallel recorders
+  3. Writes the snapshots to the spool
+  4. Forwards data to the database when ready
+  5. Answers questions from the setup screen (more on that next)
+
+The backend communicates using a set of web addresses, exactly like a
+website. These addresses are called an API — Application Programming
+Interface. Other programs (like the setup screen) send a message to one of
+those addresses, and the backend responds. For example, one address starts
+the capture, another stops it, another reports the current status.
+
+
+WHAT IS THE SETUP SCREEN (THE FRONTEND)?
+──────────────────────────────────────────
+The frontend is the visible face — the screen you look at and click on. In
+this app it is a simple web page that opens in any browser on the same PC.
+
+It lets you:
+
+  • Set the sample rate (how many readings per second each scope takes)
+  • Set the window length (how many milliseconds each snapshot covers)
+  • Set the cadence (how often a new snapshot starts)
+  • Start or stop all five recorders with one button
+  • Watch the live status of every bus in real time
+
+Once you have set things up and clicked Start, you do not need to look at
+this screen again. The app runs on its own indefinitely — the screen is only
+there for the moments when you are configuring or checking in.
+
+
+WHAT IS DOCKER?
+────────────────
+Imagine you want to move a fully assembled piece of factory equipment from
+one building to another. If you disassemble it and try to rebuild it in the
+new building, something might not fit — the ceiling is lower, the power
+outlets are different, a part got lost in the move.
+
+Docker solves this problem for software. It packages the entire app —
+the Python engine, every library it depends on, the setup screen, and even
+the database — into a self-contained box called a container. The container
+carries everything it needs to run, so it behaves identically on your current
+laptop, on the mini PC, or on any other machine that has Docker installed.
+
+To transfer CANlogger to the mini PC, you copy the files and run one command.
+Docker takes care of the rest. No manual installation, no version mismatches,
+no surprises.
+
+The file that describes what goes inside the container is called Dockerfile.
+The file that describes how multiple containers (the app and the database)
+work together is called docker-compose.yml.
+
+
+WHAT IS GITHUB?
+────────────────
+GitHub is an online service for storing and version-tracking code. Think of
+it as Google Drive, but designed specifically for programs. Every time a
+meaningful change is made to CANlogger, that change is recorded with a
+description of what was done and why. You can always look back at the full
+history, compare old and new versions, or roll back to an earlier state if
+something goes wrong.
+
+The CANlogger code lives at:
+
+  https://github.com/forrest-molg/CANlogger
+
+When your mini PC arrives, you can pull the latest version of the app onto
+it with a single command:
+
+  git clone https://github.com/forrest-molg/CANlogger.git
+
+
+THE LIFE OF A SINGLE SNAPSHOT
+───────────────────────────────
+To tie it all together, here is what happens in a single 10-millisecond
+moment while the app is running:
+
+  1. The oscilloscope on CAN Bus 2 finishes measuring 50,000 voltage
+     readings over the last 10 ms.
+
+  2. The backend collects those readings and notes the exact microsecond
+     they began.
+
+  3. The snapshot is placed in the spool on the hard drive, safely saved.
+
+  4. In the background, the database uploader picks up that snapshot (and
+     a batch of others just like it) and stores them permanently in the
+     PostgreSQL database.
+
+  5. The setup screen, if it is open, asks for the latest status. The backend
+     reports: Bus 2, 6,482 snapshots captured, last one at 14:03:22.991047.
+
+  6. Ten milliseconds later, the whole thing happens again.
+
+This loop runs for every one of the five buses, simultaneously, for weeks
+on end — unattended, without pause.
+
+
+THE SIMULATOR
+─────────────
+Because your oscilloscopes have not arrived yet, the app currently runs in
+simulator mode. Instead of talking to real hardware, it generates synthetic
+signals that look like realistic CAN bus waveforms — complete with the
+characteristic square wave shape, a small amount of electrical noise, and
+occasional ringing artifacts that real signals produce.
+
+This means you can run the full app right now, watch all five streams
+counting upward, and verify that the storage and database plumbing works
+exactly as expected — before a single piece of hardware is plugged in.
+
+Switching to real hardware later is a one-line change in the settings file:
+
+  mode: picoscope
+
+
+A MAP OF THE FILES
+───────────────────
+
+  backend/              The Python engine room
+    main.py             The front door — receives commands from the GUI
+    config.py           Reads and writes the settings file
+    models.py           Defines the shape of a snapshot and a status report
+    capture_service.py  Runs the five parallel recorders
+    simulator.py        Generates fake-but-realistic waveforms for testing
+    storage.py          Saves snapshots to disk and forwards to the database
+    picoscope_driver.py Placeholder for the real hardware connection
+
+  config/
+    default.yaml        The main settings file you can edit in a text editor
+
+  frontend/
+    index.html          The setup screen layout
+    app.js              The setup screen logic
+    styles.css          The setup screen appearance
+
+  scripts/
+    init_db.sql         Creates the database tables the first time
+
+  docker-compose.yml    Describes the full app + database as one deployable unit
+  Dockerfile            Describes how to build the app container
+  start.sh              One command to start everything
+  stop.sh               One command to stop everything
+  README.md             Technical reference for developers
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -7,7 +7,7 @@ CANlogger is a transferable multi-stream waveform logger designed for a mini PC 
 - Precise microsecond window timestamps
 - Durable local spool files for high-rate waveform windows
 - Optional PostgreSQL upload path (feature flag)
-- Simple built-in setup GUI for start/stop and config
+- Svelte-based setup GUI for start/stop and config
 - Docker Compose packaging for easy transfer to another machine
 
 ## Why 5 MS/s at 125 kbps
@@ -43,9 +43,10 @@ Planned next (hardware-on-desk phase):
 - backend/storage.py: spool writer and optional PostgreSQL uploader
 - backend/picoscope_driver.py: PicoScope integration contract stub
 - config/default.yaml: editable runtime defaults for 5 buses
-- frontend/index.html: setup GUI
-- frontend/app.js: GUI API actions and status polling
-- frontend/styles.css: GUI styling
+- frontend/src/App.svelte: control panel UI
+- frontend/src/app.css: neumorphic dark theme
+- frontend/src/main.js: Svelte entrypoint
+- frontend/package.json: frontend dependency and build configuration
 - scripts/init_db.sql: PostgreSQL schema bootstrap
 - docker-compose.yml: portable deployment
 - start.sh: start stack
@@ -72,6 +73,8 @@ chmod +x start.sh stop.sh
 - Click Save Config
 - Click Start Capture
 - Watch per-stream counters increment
+
+Note: the frontend is built automatically in Docker; no manual Node steps are required on the mini PC.
 
 5. Stop stack when done:
 
@@ -124,6 +127,10 @@ Recommended production posture:
 ## Run Without Docker (Developer Mode)
 
 ```bash
+cd frontend
+npm install
+npm run build
+
 cd backend
 python3 -m venv .venv
 . .venv/bin/activate

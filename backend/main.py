@@ -14,7 +14,8 @@ from models import ConfigUpdateRequest, StartCaptureRequest
 APP_ROOT = Path(__file__).resolve().parent
 PROJECT_ROOT = APP_ROOT.parent
 CONFIG_PATH = PROJECT_ROOT / "config" / "default.yaml"
-FRONTEND_DIR = PROJECT_ROOT / "frontend"
+FRONTEND_DIST_DIR = PROJECT_ROOT / "frontend" / "dist"
+FRONTEND_DIST_ASSETS_DIR = FRONTEND_DIST_DIR / "assets"
 
 config: AppConfig = load_config(CONFIG_PATH)
 capture_service = CaptureService(config)
@@ -27,8 +28,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-if FRONTEND_DIR.exists():
-    app.mount("/assets", StaticFiles(directory=FRONTEND_DIR), name="assets")
+if FRONTEND_DIST_ASSETS_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=FRONTEND_DIST_ASSETS_DIR), name="assets")
 
 
 @app.get("/health")
@@ -38,9 +39,9 @@ def health() -> dict[str, str]:
 
 @app.get("/")
 def ui() -> FileResponse:
-    index_file = FRONTEND_DIR / "index.html"
+    index_file = FRONTEND_DIST_DIR / "index.html"
     if not index_file.exists():
-        raise HTTPException(status_code=404, detail="GUI not found")
+        raise HTTPException(status_code=404, detail="GUI not found. Build frontend first.")
     return FileResponse(index_file)
 
 

@@ -1,3 +1,11 @@
+FROM node:20-alpine AS frontend-builder
+
+WORKDIR /frontend
+COPY frontend/package.json /frontend/package.json
+RUN npm install
+COPY frontend /frontend
+RUN npm run build
+
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -10,7 +18,7 @@ RUN pip install --no-cache-dir uv && \
     cd /app/backend && uv pip install --system -e .
 
 COPY backend /app/backend
-COPY frontend /app/frontend
+COPY --from=frontend-builder /frontend/dist /app/frontend/dist
 COPY config /app/config
 COPY scripts /app/scripts
 
