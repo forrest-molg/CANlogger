@@ -8,7 +8,7 @@ These are the only steps needed on a fresh machine.
 2. Install CANlogger from GitHub release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/install.sh | bash -s -- --repo OWNER/REPO --tag latest
+curl -fsSL https://raw.githubusercontent.com/forrest-molg/CANlogger/main/install.sh | bash -s -- --repo forrest-molg/CANlogger --tag latest
 ```
 
 3. Open the app:
