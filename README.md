@@ -1,8 +1,51 @@
 # CANlogger
 
+## Install on Beelink or Any Linux PC
+
+These are the only steps needed on a fresh machine.
+
+1. Install Docker Engine and Docker Compose plugin.
+2. Install CANlogger from GitHub release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/main/install.sh | bash -s -- --repo OWNER/REPO --tag latest
+```
+
+3. Open the app:
+
+- GUI: http://localhost:8000
+- API docs: http://localhost:8000/docs
+
+The installer places CANlogger in /opt/CANlogger and enables a systemd service named canlogger.service so it starts automatically on boot.
+
+Useful commands after install:
+
+```bash
+sudo systemctl status canlogger
+sudo systemctl restart canlogger
+sudo systemctl stop canlogger
+sudo systemctl start canlogger
+```
+
+For manual local install from a cloned repository:
+
+```bash
+cd CANlogger
+./install.sh --local
+```
+
+To publish installable bundles from GitHub, create and push a version tag:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The GitHub workflow packages and uploads a release bundle automatically.
+
 CANlogger is a transferable multi-stream waveform logger designed for a mini PC that will run continuously for weeks. This first implementation provides:
 
-- 5 parallel stream workers (simulator mode now, PicoScope mode scaffolded)
+- 5 parallel stream workers (PicoScope mode implemented, simulator still available)
 - Adjustable snapshot capture settings: sample rate, window duration, and cadence
 - Precise microsecond window timestamps
 - Durable local spool files for high-rate waveform windows
@@ -23,14 +66,14 @@ This provides strong signal-integrity visibility without pushing data rates as h
 
 Implemented now:
 
-- Simulator-based end-to-end pipeline to validate architecture before hardware arrives
+- Simulator-based end-to-end pipeline for validation
+- PicoScope 2204A block capture path via `picosdk` + `libps2000a`
 - API and GUI for setup and runtime monitoring
 - Dockerized app + PostgreSQL service
 - Local spool persistence in JSONL windows
 
 Planned next (hardware-on-desk phase):
 
-- Replace simulator path with PicoSDK integration in backend/picoscope_driver.py
 - Add live scope discovery and serial auto-mapping from USB
 - Add reconnect handling tied to actual device behavior
 
@@ -141,18 +184,24 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 
 ## Hardware Integration Plan
 
-When your five PicoScope 2204A units arrive:
+Current single-device bring-up (CAN H on channel A):
 
-1. Install PicoSDK on the mini PC.
-2. Implement capture methods in backend/picoscope_driver.py.
-3. Switch mode in config/default.yaml:
+1. Keep mode in config/default.yaml as:
 
 ```yaml
 mode: picoscope
 ```
 
-4. Map real serials in devices list.
-5. Run 1-scope test, then 5-scope burn-in.
+2. Enable `CAN_BUS_1` on channel `A` and set `CAN_BUS_2..5` to `enabled: false`.
+3. Start with `./start.sh` and confirm stream states in GUI/API:
+
+- `CAN_BUS_1`: `ACTIVE` (or `ERROR` with diagnostic text)
+- `CAN_BUS_2..5`: `OFFLINE`
+
+4. When adding more scopes, assign real serial numbers and enable those buses.
+
+If Pico import fails in Docker, the image now installs `libps2000a` from Pico's apt repository and sets `LD_LIBRARY_PATH=/opt/picoscope/lib`.
+The container also bind-mounts `/dev/bus/usb` and `/run/udev` so Pico's Linux driver can see live USB topology correctly.
 
 ## Transfer to Mini PC
 
@@ -171,5 +220,5 @@ This gives repeatable setup on any compatible Linux host.
 - [x] Microsecond timestamping
 - [x] Setup GUI for initial deployment
 - [x] Dockerized app + PostgreSQL
-- [ ] Real PicoScope API capture implementation
+- [x] Real PicoScope API capture implementation
 - [ ] Long-duration endurance tuning with hardware attached

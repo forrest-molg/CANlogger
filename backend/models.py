@@ -17,10 +17,23 @@ class WaveformWindow(BaseModel):
     values_v: list[float]
 
 
+class BusWaveformWindow(BaseModel):
+    device_serial: str
+    bus_name: str
+    sample_rate_hz: int
+    sample_interval_ns: int
+    window_ms: int
+    started_at_us: int
+    can_h_values_v: list[float]
+    can_l_values_v: list[float]
+
+
 class StreamStatus(BaseModel):
     device_serial: str
     bus_name: str
+    channel: Literal["A", "B"] | None = None
     active: bool
+    state: Literal["ACTIVE", "IDLE", "OFFLINE", "ERROR"] = "IDLE"
     windows_captured: int = 0
     samples_captured: int = 0
     last_window_started_at_us: int | None = None
@@ -32,6 +45,21 @@ class RuntimeStatus(BaseModel):
     mode: str
     streams: list[StreamStatus]
     uptime_s: float = 0.0
+
+
+class SnapshotStreamResult(BaseModel):
+    device_serial: str
+    bus_name: str
+    state: Literal["ACTIVE", "IDLE", "OFFLINE", "ERROR"]
+    captured: bool
+    last_error: str | None = None
+    window: BusWaveformWindow | None = None
+
+
+class SnapshotResponse(BaseModel):
+    mode: str
+    captured_at_us: int
+    streams: list[SnapshotStreamResult]
 
 
 class StartCaptureRequest(BaseModel):

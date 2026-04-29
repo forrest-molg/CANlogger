@@ -1,0 +1,245 @@
+================================================================================
+CANLOGGER — GEEKOM A6 DATABASE INTEGRATION OVERVIEW
+================================================================================
+Last updated:  2026-04-29
+ThinkPad app:  /home/forrestthinkpad/Documents/CANlogger
+Geekom A6:     100.113.84.82  (Tailscale)
+Ingest URL:    http://100.113.84.82:8000/ingest
+Health check:  http://100.113.84.82:8000/health
+Waveform UI:   http://100.113.84.82:3000
+
+
+================================================================================
+WHAT WAS INTEGRATED AND WHY
+================================================================================
+The CANlogger app originally captured CAN bus waveforms from a PicoScope 2204A,
+stored them locally in JSONL spool files, and optionally uploaded them to a
+local PostgreSQL container.
+
+The Geekom A6 mini PC runs a purpose-built waveform database with a REST API.
+The integration adds a parallel upload path: after every capture window is
+saved to the local spool, the same window is also streamed to the Geekom
+database in the background.  The existing local storage path is unchanged.
+
+Benefits:
+  - Long-term waveform storage on a dedicated always-on machine.
+  - Time-range queries and waveform visualization via the Geekom web UI.
+  - Multi-machine support: the ThinkPad uses bus_id=1; a future Beelink can
+    use buses 2-5 without conflict.
+
+
+================================================================================
+FILES ADDED OR CHANGED
+================================================================================
+
+backend/geekom_uploader.py          (NEW)
+    Core upload logic.  Contains GeekomAsyncUploader, which:
+      - Accepts a BusWaveformWindow from the capture loop.
+      - Converts the float-volt arrays back to int16 ADC counts.
+      - LZ4-compresses the raw int16 bytes (lz4.frame).
+      - Base64-encodes the compressed bytes.
+      - Builds a JSON payload with two chunks (channel "H" for CAN High,
+        channel "L" for CAN Low) matching the Geekom /ingest data contract.
+      - POSTs the payload in a background daemon thread so the capture loop
+        is never blocked.
+      - Drops windows with a warning log if the queue is full; capture
+        continues uninterrupted regardless of network conditions.
+
+backend/config.py                   (MODIFIED)
+    Added GeekomSettings Pydantic model:
+        enabled         bool    — master on/off switch (default: false)
+        ingest_url      str     — full URL to the /ingest endpoint
+        bus_id          int     — 1–5; ThinkPad is always 1
+        post_timeout_s  int     — HTTP POST timeout in seconds (default: 10)
+        max_queue       int     — upload queue depth before drops (default: 20)
+    AppConfig now includes a `geekom: GeekomSettings` field so all settings
+    are controlled via config/default.yaml and validated at startup.
+
+backend/capture_service.py          (MODIFIED)
+    - Imports GeekomAsyncUploader.
+    - start():  when geekom.enabled is true, creates and starts the uploader.
+    - stop():   calls uploader.stop() (drains the queue with a 15 s timeout).
+    - _capture_loop():        calls self._geekom.enqueue(combined) after
+                              self._storage.enqueue(combined).
+    - _capture_loop_scope():  same — enqueues after each BusWaveformWindow
+                              is produced for every bus.
+
+config/default.yaml                 (MODIFIED)
+    Added geekom section:
+        geekom:
+          enabled: false
+          ingest_url: http://100.113.84.82:8000/ingest
+          bus_id: 1
+          post_timeout_s: 10
+          max_queue: 20
+    Set enabled to true to activate streaming.
+
+backend/pyproject.toml              (MODIFIED)
+    Added runtime dependencies:
+        lz4>=4.3.0
+        requests>=2.32.0
+
+
+================================================================================
+HOW THE DATA FLOWS
+================================================================================
+
+  PicoScope 2204A
+       |
+       | (ADC int16 samples via ps2000aGetValues)
+       v
+  capture_service.py  ──►  picoscope_driver.py
+       |
+       | (BusWaveformWindow: float volts, sample_rate_hz, started_at_us)
+       |
+       +──────────────────────────────►  WindowStorage  (local JSONL spool)
+       |
+       └──────────────────────────────►  GeekomAsyncUploader.enqueue()
+                                               |
+                                               | (background thread)
+                                               v
+                                         _volts_to_int16()
+                                         lz4.frame.compress()
+                                         base64.b64encode()
+                                               |
+                                               v
+                                    POST /ingest  (JSON array, 2 chunks)
+                                               |
+                                               v
+                                        Geekom A6 database
+                                        http://100.113.84.82:3000
+
+
+================================================================================
+THE /ingest PAYLOAD FORMAT
+================================================================================
+Each POST carries both channels for one capture window as a JSON array:
+
+  [
+    {
+      "time_utc":    "2026-04-29T15:30:00.123456+00:00",
+      "bus_id":      1,
+      "channel":     "H",
+      "sample_rate": 3125000,
+      "n_samples":   3125,
+      "samples_b64": "<base64-encoded LZ4-compressed int16 bytes>"
+    },
+    {
+      "time_utc":    "2026-04-29T15:30:00.123456+00:00",
+      "bus_id":      1,
+      "channel":     "L",
+      "sample_rate": 3125000,
+      "n_samples":   3125,
+      "samples_b64": "<base64-encoded LZ4-compressed int16 bytes>"
+    }
+  ]
+
+Rules enforced by geekom_uploader.py:
+  - time_utc is always timezone-aware UTC (derived from started_at_us).
+  - channel is always uppercase "H" or "L".
+  - n_samples matches the actual array length.
+  - samples_b64 is LZ4 frame format, little-endian int16, base64 ASCII.
+
+The Geekom database returns:  {"inserted": 2}
+
+
+================================================================================
+INT16 CONVERSION — WHY IT IS NEEDED
+================================================================================
+The PicoScope driver converts raw ADC counts to float volts before storing
+them in BusWaveformWindow.  The Geekom database expects raw int16 ADC counts.
+
+geekom_uploader.py reverses the conversion:
+  adc = round(volts / 5.0 * 32767).clip(-32768, 32767).astype(int16)
+
+This uses the same 5 V full-scale range and 32767 denominator that the
+PicoScope driver uses in the forward direction.  The round-trip is lossless
+within the 16-bit quantisation of the original hardware.
+
+
+================================================================================
+CONCURRENCY MODEL
+================================================================================
+GeekomAsyncUploader creates one daemon thread at startup.  The capture loop
+(asyncio) calls enqueue(), which places the window into a bounded queue
+(default depth 20) without blocking.  The daemon thread dequeues and POSTs.
+
+If the Geekom is unreachable:
+  - Each POST times out after post_timeout_s seconds (default 10 s).
+  - A WARNING is logged.
+  - The next window is processed immediately; retries are not attempted.
+  - If timeouts are slow enough to fill the queue, further windows are
+    dropped with a WARNING.  Capture is never paused or interrupted.
+
+If the Geekom comes back online, uploads resume automatically on the next
+successfully dequeued window.
+
+
+================================================================================
+ENABLING THE INTEGRATION
+================================================================================
+1.  Confirm Tailscale is running on the ThinkPad:
+      tailscale status
+    Both machines must show as "Connected".
+
+2.  Verify the Geekom API is reachable:
+      curl http://100.113.84.82:8000/health
+    Expected:  {"status":"ok"}
+
+3.  Install the new dependencies inside the backend environment:
+      pip install lz4 requests
+    (or re-run  uv sync  if using uv with the updated pyproject.toml)
+
+4.  Open  config/default.yaml  and set:
+      geekom:
+        enabled: true
+
+5.  Start (or restart) the CANlogger app.  The log will show:
+      INFO  Geekom async uploader started url=http://100.113.84.82:8000/ingest bus_id=1
+    and after each successful window upload:
+      DEBUG Geekom upload OK bus=CAN_BUS_1 t_utc=... inserted=2
+
+6.  Open http://100.113.84.82:3000 to view waveforms.
+    Query:  Bus 1 | Channel CAN High | time range: last N minutes.
+
+
+================================================================================
+DISABLING THE INTEGRATION
+================================================================================
+Set  geekom.enabled: false  in config/default.yaml and restart the app.
+No other changes are needed.  The local spool continues to work normally.
+
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+WARNING: Geekom upload failed — ConnectionError
+  Tailscale is not running or not authenticated.
+  Run:  tailscale status
+  Verify:  curl http://100.113.84.82:8000/health
+
+WARNING: Geekom upload failed — HTTP 422
+  A field in the payload is invalid.  Check:
+    - time_utc has a timezone offset ("+00:00").
+    - channel is "H" or "L" (uppercase).
+    - n_samples matches the actual array length.
+    - samples_b64 is valid base64 of LZ4-compressed data.
+
+WARNING: Geekom upload queue full — window dropped
+  The POST is taking longer than the window cadence.
+  Options:
+    - Increase max_queue in config/default.yaml (uses more RAM).
+    - Reduce post_timeout_s if the Geekom is reliably fast.
+    - Reduce stream.window_ms to produce smaller payloads.
+
+No data in waveform viewer after upload succeeds
+  Time range mismatch.  The viewer query must use UTC.
+  Verify the ThinkPad clock is NTP-synchronized:
+    timedatectl status
+  Should show:  "synchronized: yes"
+
+
+================================================================================
+END
+================================================================================

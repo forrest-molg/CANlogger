@@ -1,15 +1,16 @@
 [Unit]
 Description=CANlogger waveform capture service
-After=network.target
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
 
 [Service]
-Type=simple
-WorkingDirectory=/opt/CANlogger/backend
-ExecStart=/opt/CANlogger/backend/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000
-Restart=always
-RestartSec=5
-User=canlogger
-Group=canlogger
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/CANlogger
+ExecStart=/usr/bin/env bash -lc 'docker compose -f /opt/CANlogger/docker-compose.yml up -d'
+ExecStop=/usr/bin/env bash -lc 'docker compose -f /opt/CANlogger/docker-compose.yml down'
+TimeoutStartSec=0
 
 [Install]
 WantedBy=multi-user.target

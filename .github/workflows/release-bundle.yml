@@ -1,0 +1,47 @@
+name: Build Release Bundle
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build bundle archives
+        run: |
+          chmod +x scripts/build_release_bundle.sh
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="run-${GITHUB_RUN_ID}"
+          fi
+          scripts/build_release_bundle.sh "${VERSION}"
+          echo "BUNDLE_VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Upload CI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: canlogger-bundle-${{ env.BUNDLE_VERSION }}
+          path: |
+            dist/canlogger-linux-x86_64.tar.gz
+            dist/canlogger-linux-x86_64.tar.gz.sha256
+            dist/canlogger-${{ env.BUNDLE_VERSION }}-linux-x86_64.tar.gz
+
+      - name: Publish GitHub release assets
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/canlogger-linux-x86_64.tar.gz
+            dist/canlogger-linux-x86_64.tar.gz.sha256
+            dist/canlogger-${{ env.BUNDLE_VERSION }}-linux-x86_64.tar.gz

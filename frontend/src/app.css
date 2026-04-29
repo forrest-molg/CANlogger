@@ -133,6 +133,12 @@ body {
   border: 1px solid rgba(77, 144, 240, 0.22);
 }
 
+.mode-badge.live {
+  background: var(--success-dim);
+  color: var(--success);
+  border-color: rgba(52, 211, 153, 0.22);
+}
+
 .status-badge {
   background: var(--raised);
   box-shadow: var(--shadow-flat);
@@ -199,6 +205,101 @@ body {
   letter-spacing: 0.04em;
   color: var(--text-3);
   font-family: var(--mono);
+}
+
+.snapshot-empty {
+  margin: 0;
+  color: rgba(222, 229, 242, 0.88);
+}
+
+.snapshot-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 0.9rem;
+}
+
+.snapshot-card {
+  border: 1px solid rgba(160, 175, 210, 0.28);
+  border-radius: 14px;
+  padding: 0.8rem;
+  background: rgba(17, 23, 38, 0.7);
+  display: grid;
+  gap: 0.6rem;
+}
+
+.snapshot-card.active {
+  border-color: rgba(109, 231, 193, 0.45);
+  box-shadow: 0 0 0 1px rgba(109, 231, 193, 0.14) inset;
+}
+
+.snapshot-card.error {
+  border-color: rgba(251, 146, 146, 0.5);
+  box-shadow: 0 0 0 1px rgba(251, 146, 146, 0.16) inset;
+}
+
+.snapshot-card.offline {
+  border-color: rgba(148, 163, 184, 0.4);
+  background: rgba(15, 20, 33, 0.55);
+}
+
+.snapshot-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.snapshot-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  font-size: 0.76rem;
+  color: rgba(212, 220, 235, 0.9);
+}
+
+.snapshot-meta span {
+  padding: 0.2rem 0.45rem;
+  border: 1px solid rgba(170, 184, 216, 0.22);
+  border-radius: 999px;
+  background: rgba(15, 20, 33, 0.75);
+}
+
+.wave-svg {
+  width: 100%;
+  height: 130px;
+  border: 1px solid rgba(156, 177, 218, 0.3);
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, rgba(12, 19, 35, 0.92) 0%, rgba(7, 12, 24, 0.96) 100%),
+    repeating-linear-gradient(
+      to right,
+      rgba(119, 146, 201, 0.08) 0,
+      rgba(119, 146, 201, 0.08) 1px,
+      transparent 1px,
+      transparent 64px
+    );
+}
+
+.wave-svg path {
+  fill: none;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.wave-svg path.wave-h {
+  stroke: rgba(113, 236, 194, 0.95);
+}
+
+.wave-svg path.wave-l {
+  stroke: rgba(130, 184, 255, 0.95);
+}
+
+.snapshot-no-wave {
+  border: 1px dashed rgba(168, 182, 213, 0.34);
+  border-radius: 10px;
+  padding: 0.9rem;
+  color: rgba(204, 214, 232, 0.8);
+  font-size: 0.82rem;
 }
 
 .settings-grid {
@@ -365,6 +466,10 @@ body {
   border-color: rgba(248, 113, 113, 0.25);
 }
 
+.stream-card.offline {
+  border-color: rgba(138, 154, 184, 0.25);
+}
+
 .stream-top {
   display: flex;
   align-items: center;
@@ -401,6 +506,12 @@ body {
 .stream-status-pill.error {
   background: var(--danger-dim);
   color: var(--danger);
+  box-shadow: none;
+}
+
+.stream-status-pill.offline {
+  background: rgba(138, 154, 184, 0.14);
+  color: var(--text-2);
   box-shadow: none;
 }
 

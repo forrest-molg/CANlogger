@@ -1,12 +1,17 @@
 api_host: 0.0.0.0
 api_port: 8000
-mode: simulator
+mode: picoscope
 
 stream:
-  sample_rate_hz: 5000000
-  window_ms: 10
+  # Matches real PicoScope capture: 0.32 us intervals, 1 ms window, 3.2V falling edge trigger
+  sample_rate_hz: 3125000
+  window_ms: 1
   cadence_ms: 10
-  channels_per_scope: 1
+  channels_per_scope: 2
+  trigger_enabled: true
+  trigger_threshold_v: 3.2
+  trigger_direction: falling
+  trigger_pre_trigger_pct: 10
 
 storage:
   spool_dir: /data/spool
@@ -14,24 +19,31 @@ storage:
   postgres_dsn: postgresql://postgres:postgres@postgres:5432/canlogger
   upload_batch_windows: 100
 
+geekom:
+  enabled: false
+  ingest_url: http://100.113.84.82:8000/ingest
+  bus_id: 1
+  post_timeout_s: 10
+  max_queue: 20
+
 devices:
   - bus_name: CAN_BUS_1
-    serial: PICO-2204A-001
+    serial: AUTO
     channel: A
     enabled: true
-  - bus_name: CAN_BUS_2
-    serial: PICO-2204A-002
-    channel: A
+  - bus_name: CAN_BUS_1
+    serial: AUTO
+    channel: B
     enabled: true
   - bus_name: CAN_BUS_3
-    serial: PICO-2204A-003
+    serial: DISABLED-003
     channel: A
-    enabled: true
+    enabled: false
   - bus_name: CAN_BUS_4
-    serial: PICO-2204A-004
+    serial: DISABLED-004
     channel: A
-    enabled: true
+    enabled: false
   - bus_name: CAN_BUS_5
-    serial: PICO-2204A-005
+    serial: DISABLED-005
     channel: A
-    enabled: true
+    enabled: false

@@ -12,6 +12,7 @@
     Layers,
     HardDrive,
     GitBranch,
+    ScanLine,
   } from "lucide-svelte";
 
   let sampleRate = 5000000;
@@ -24,9 +25,14 @@
   let storageQueue = 0;
   let streams = [];
 
+  $: modeLive = mode === "PICOSCOPE";
+  $: modeLabel = mode === "PICOSCOPE" ? "LIVE" : mode === "SIMULATOR" ? "SIM" : mode;
+
   let busy = false;
   let alert = null;
   let pollTimer = null;
+  let snapshot = null;
+  let snapshotBusy = false;
 
   const API_TIMEOUT_MS = 10000;
 
@@ -66,6 +72,60 @@
     const ss = String(d.getSeconds()).padStart(2, "0");
     const ms = String(d.getMilliseconds()).padStart(3, "0");
     return `${hh}:${mm}:${ss}.${ms}`;
+  }
+
+  function chartPoints(values, maxPoints = 720) {
+    if (!Array.isArray(values) || values.length === 0) return [];
+    const step = Math.max(1, Math.ceil(values.length / maxPoints));
+    const reduced = [];
+    for (let i = 0; i < values.length; i += step) reduced.push(values[i]);
+    return reduced;
+  }
+
+  function chartPath(values, width = 640, height = 130, pad = 8, maxPoints = 720) {
+    const points = chartPoints(values, maxPoints);
+    if (points.length < 2) return "";
+
+    let min = points[0];
+    let max = points[0];
+    for (const v of points) {
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    const range = Math.max(max - min, 1e-9);
+    const plotW = width - pad * 2;
+    const plotH = height - pad * 2;
+
+    let d = "";
+    for (let i = 0; i < points.length; i += 1) {
+      const x = pad + (i / (points.length - 1)) * plotW;
+      const y = pad + (1 - (points[i] - min) / range) * plotH;
+      d += `${i === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)} `;
+    }
+    return d.trim();
+  }
+
+  function voltageRange(values) {
+    if (!Array.isArray(values) || values.length === 0) return "-";
+    let min = values[0];
+    let max = values[0];
+    for (const v of values) {
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    return `${min.toFixed(2)}V to ${max.toFixed(2)}V`;
+  }
+
+  function voltageRangeDual(highValues, lowValues) {
+    const all = [...(Array.isArray(highValues) ? highValues : []), ...(Array.isArray(lowValues) ? lowValues : [])];
+    if (all.length === 0) return "-";
+    let min = all[0];
+    let max = all[0];
+    for (const v of all) {
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+    return `${min.toFixed(2)}V to ${max.toFixed(2)}V`;
   }
 
   function showAlert(message, kind = "success") {
@@ -169,6 +229,22 @@
     }
   }
 
+  async function captureSingleWindow() {
+    snapshotBusy = true;
+    try {
+      const data = await apiFetch("/api/capture/snapshot", {
+        method: "POST",
+      });
+      snapshot = data;
+      showAlert("Single-window capture complete.", "success");
+      await pollStatus();
+    } catch (err) {
+      showAlert(err.message || String(err), "error");
+    } finally {
+      snapshotBusy = false;
+    }
+  }
+
   async function pollStatus() {
     try {
       const status = await apiFetch("/api/status");
@@ -198,7 +274,7 @@
   </div>
 
   <div class="header-badges">
-    <div class="badge mode-badge"><Cpu size={12} /> {mode}</div>
+    <div class={`badge mode-badge ${modeLive ? "live" : ""}`}><Cpu size={12} /> {modeLabel}</div>
     <div class={`badge status-badge ${running ? "running" : ""}`}>
       <span class="status-dot"></span>
       {statusLabel}
@@ -255,6 +331,11 @@
         Start Capture
       </button>
 
+      <button class="neo-btn neo-btn-accent" on:click={captureSingleWindow} disabled={running || busy || snapshotBusy}>
+        <ScanLine size={15} />
+        Capture 1 Window
+      </button>
+
       <button class="neo-btn neo-btn-danger" on:click={stopCapture} disabled={!running || busy}>
         <StopCircle size={15} />
         Stop
@@ -274,13 +355,13 @@
     </div>
 
     <div class="streams-grid">
-      {#each streams as stream (stream.device_serial)}
-        <article class={`stream-card ${stream.last_error ? "error" : stream.active ? "active" : ""}`}>
+      {#each streams as stream (`${stream.device_serial}-${stream.bus_name}`)}
+        <article class={`stream-card ${stream.state === "ERROR" ? "error" : stream.state === "ACTIVE" ? "active" : stream.state === "OFFLINE" ? "offline" : ""}`}>
           <div class="stream-top">
             <span class="stream-bus-name">{stream.bus_name}</span>
-            <span class={`stream-status-pill ${stream.last_error ? "error" : stream.active ? "active" : ""}`}>
+            <span class={`stream-status-pill ${stream.state === "ERROR" ? "error" : stream.state === "ACTIVE" ? "active" : stream.state === "OFFLINE" ? "offline" : ""}`}>
               <span class="pill-dot"></span>
-              {stream.last_error ? "ERROR" : stream.active ? "ACTIVE" : "IDLE"}
+              {stream.state}
             </span>
           </div>
 
@@ -305,6 +386,53 @@
         </article>
       {/each}
     </div>
+  </section>
+
+  <section class="neo-panel">
+    <div class="panel-header">
+      <ScanLine class="panel-icon" size={17} />
+      <h2>Single Window Verification</h2>
+      {#if snapshot}
+        <span class="panel-header-meta">Captured: {fmtTimestampUs(snapshot.captured_at_us)}</span>
+      {/if}
+    </div>
+
+    {#if !snapshot}
+      <p class="snapshot-empty">Run Capture 1 Window to acquire and view one waveform window per bus.</p>
+    {:else}
+      <div class="snapshot-grid">
+        {#each snapshot.streams as result (`${result.device_serial}-${result.bus_name}`)}
+          <article class={`snapshot-card ${result.state === "ERROR" ? "error" : result.state === "ACTIVE" ? "active" : result.state === "OFFLINE" ? "offline" : ""}`}>
+            <div class="snapshot-top">
+              <span class="stream-bus-name">{result.bus_name}</span>
+              <span class={`stream-status-pill ${result.state === "ERROR" ? "error" : result.state === "ACTIVE" ? "active" : result.state === "OFFLINE" ? "offline" : ""}`}>
+                <span class="pill-dot"></span>
+                {result.state}
+              </span>
+            </div>
+
+            {#if result.window}
+              <div class="snapshot-meta">
+                <span>{fmtHz(result.window.sample_rate_hz)}</span>
+                <span>{fmtNum(Math.max(result.window.can_h_values_v.length, result.window.can_l_values_v.length))} samples</span>
+                <span>{voltageRangeDual(result.window.can_h_values_v, result.window.can_l_values_v)}</span>
+              </div>
+
+              <svg class="wave-svg" viewBox="0 0 640 130" role="img" aria-label={`Waveform for ${result.bus_name}`}>
+                <path class="wave-h" d={chartPath(result.window.can_h_values_v, 640, 130, 8, result.window.can_h_values_v.length)} />
+                <path class="wave-l" d={chartPath(result.window.can_l_values_v, 640, 130, 8, result.window.can_l_values_v.length)} />
+              </svg>
+            {:else}
+              <div class="snapshot-no-wave">No waveform captured for this bus.</div>
+            {/if}
+
+            {#if result.last_error}
+              <div class="stream-error">{result.last_error}</div>
+            {/if}
+          </article>
+        {/each}
+      </div>
+    {/if}
   </section>
 </main>
 

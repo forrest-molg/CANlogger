@@ -8,11 +8,16 @@ from pydantic import BaseModel, Field, PositiveInt
 
 
 class StreamSettings(BaseModel):
-    # Default for 125 kbps CAN gives 40 samples/bit and good SI visibility.
-    sample_rate_hz: PositiveInt = 5_000_000
-    window_ms: int = Field(default=10, ge=1, le=1000)
+    # 3.125 MHz / 1 ms matches the real PicoScope capture: 0.32 us intervals, ~3129 samples/window.
+    sample_rate_hz: PositiveInt = 3_125_000
+    window_ms: int = Field(default=1, ge=1, le=1000)
     cadence_ms: int = Field(default=10, ge=1, le=1000)
     channels_per_scope: int = Field(default=1, ge=1, le=2)
+    # Trigger settings — matched to real CAN bus capture (3.2V falling edge, 10% pre-trigger).
+    trigger_enabled: bool = True
+    trigger_threshold_v: float = Field(default=3.2, ge=0.0, le=20.0)
+    trigger_direction: Literal["rising", "falling"] = "falling"
+    trigger_pre_trigger_pct: int = Field(default=10, ge=0, le=90)
 
 
 class DeviceConfig(BaseModel):
@@ -29,12 +34,21 @@ class StorageSettings(BaseModel):
     upload_batch_windows: int = Field(default=100, ge=1, le=10_000)
 
 
+class GeekomSettings(BaseModel):
+    enabled: bool = False
+    ingest_url: str = "http://100.113.84.82:8000/ingest"
+    bus_id: int = Field(default=1, ge=1, le=5)
+    post_timeout_s: int = Field(default=10, ge=1, le=60)
+    max_queue: int = Field(default=20, ge=1, le=200)
+
+
 class AppConfig(BaseModel):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     mode: Literal["simulator", "picoscope"] = "simulator"
     stream: StreamSettings = StreamSettings()
     storage: StorageSettings = StorageSettings()
+    geekom: GeekomSettings = GeekomSettings()
     devices: list[DeviceConfig] = Field(default_factory=list)
 
 

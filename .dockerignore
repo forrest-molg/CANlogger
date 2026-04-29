@@ -1,0 +1,22 @@
+# VCS and editor artifacts
+.git
+.gitignore
+.vscode
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Frontend build/deps
+frontend/node_modules/
+frontend/dist/
+
+# Backend build artifacts
+backend/.venv/
+backend/.pytest_cache/
+backend/.mypy_cache/
+
+# Runtime/data artifacts
+data/

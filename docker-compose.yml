@@ -2,11 +2,16 @@ services:
   canlogger:
     build: .
     container_name: canlogger-app
+    privileged: true
+    environment:
+      CANLOGGER_LOG_LEVEL: DEBUG
     ports:
       - "8000:8000"
     volumes:
       - ./config:/app/config
       - ./data:/data
+      - /dev/bus/usb:/dev/bus/usb
+      - /run/udev:/run/udev:ro
     depends_on:
       - postgres
     restart: unless-stopped
