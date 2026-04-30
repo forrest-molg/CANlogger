@@ -65,8 +65,8 @@ curl -s http://localhost:8000/api/capture/status
 
 Open in browser:
 
-- GUI: http://localhost:8000
-- API docs: http://localhost:8000/docs
+- GUI: http://localhost:8001
+- API docs: http://localhost:8001/docs
 
 ---
 

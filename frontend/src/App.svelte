@@ -3,21 +3,18 @@
   import {
     Radio,
     Cpu,
-    SlidersHorizontal,
     PlayCircle,
     StopCircle,
-    Save,
     Activity,
     Clock3,
     Layers,
     HardDrive,
     GitBranch,
     ScanLine,
+    RotateCcw,
+    Wifi,
+    WifiOff,
   } from "lucide-svelte";
-
-  let sampleRate = 5000000;
-  let windowMs = 10;
-  let cadenceMs = 10;
 
   let mode = "SIMULATOR";
   let running = false;
@@ -33,12 +30,12 @@
   let pollTimer = null;
   let snapshot = null;
   let snapshotBusy = false;
+  let rescanBusy = false;
+
+  let dbTestBusy = false;
+  let dbTestResult = null; // null | { ok, http_status, latency_ms, error, ingest_url }
 
   const API_TIMEOUT_MS = 10000;
-
-  $: sampleHint = `${Math.round(sampleRate / 125000)} samples / bit · ${fmtHz(sampleRate)}`;
-  $: windowHint = `${fmtNum(Math.round((sampleRate * windowMs) / 1000))} pts / window`;
-  $: cadenceHint = `${(1000 / Math.max(cadenceMs, 1)).toFixed(1)} windows / s`;
 
   $: statusLabel = running ? "RUNNING" : "IDLE";
   $: activeCount = streams.filter((s) => s.active).length;
@@ -82,15 +79,21 @@
     return reduced;
   }
 
-  function chartPath(values, width = 640, height = 130, pad = 8, maxPoints = 720) {
+  function chartPath(values, width = 640, height = 130, pad = 8, maxPoints = 720, yMin = null, yMax = null) {
     const points = chartPoints(values, maxPoints);
     if (points.length < 2) return "";
 
-    let min = points[0];
-    let max = points[0];
-    for (const v of points) {
-      if (v < min) min = v;
-      if (v > max) max = v;
+    let min, max;
+    if (yMin !== null && yMax !== null) {
+      min = yMin;
+      max = yMax;
+    } else {
+      min = points[0];
+      max = points[0];
+      for (const v of points) {
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
     }
     const range = Math.max(max - min, 1e-9);
     const plotW = width - pad * 2;
@@ -154,12 +157,6 @@
     }
   }
 
-  function applyConfig(cfg) {
-    sampleRate = cfg.stream.sample_rate_hz;
-    windowMs = cfg.stream.window_ms;
-    cadenceMs = cfg.stream.cadence_ms;
-  }
-
   function applyStatus(status) {
     running = Boolean(status.running);
     mode = String(status.mode || "simulator").toUpperCase();
@@ -169,43 +166,18 @@
   }
 
   async function loadConfig() {
-    const cfg = await apiFetch("/api/config");
-    applyConfig(cfg);
-  }
-
-  async function saveConfig() {
-    if (running) return;
-    busy = true;
-    try {
-      const cfg = await apiFetch("/api/config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sample_rate_hz: Number(sampleRate),
-          window_ms: Number(windowMs),
-          cadence_ms: Number(cadenceMs),
-        }),
-      });
-      applyConfig(cfg);
-      showAlert("Config saved.", "success");
-    } catch (err) {
-      showAlert(err.message || String(err), "error");
-    } finally {
-      busy = false;
-    }
+    await apiFetch("/api/config");
+    // config is fixed server-side; no UI fields to populate
   }
 
   async function startCapture() {
     busy = true;
     try {
+      // Send no overrides — server uses config/default.yaml settings (1ms/1ms, free-run)
       const status = await apiFetch("/api/capture/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sample_rate_hz: Number(sampleRate),
-          window_ms: Number(windowMs),
-          cadence_ms: Number(cadenceMs),
-        }),
+        body: JSON.stringify({}),
       });
       applyStatus({ ...status, storage_queue: storageQueue });
       showAlert("Capture started.", "success");
@@ -226,6 +198,31 @@
       showAlert(err.message || String(err), "error");
     } finally {
       busy = false;
+    }
+  }
+
+  async function testDbConnection() {
+    dbTestBusy = true;
+    dbTestResult = null;
+    try {
+      dbTestResult = await apiFetch("/api/geekom/test");
+    } catch (err) {
+      dbTestResult = { ok: false, http_status: null, latency_ms: null, error: err.message || String(err), ingest_url: "" };
+    } finally {
+      dbTestBusy = false;
+    }
+  }
+
+  async function rescanDevices() {
+    rescanBusy = true;
+    try {
+      const status = await apiFetch("/api/devices/rescan", { method: "POST" });
+      applyStatus(status);
+      showAlert("USB rescan complete.", "success");
+    } catch (err) {
+      showAlert(err.message || String(err), "error");
+    } finally {
+      rescanBusy = false;
     }
   }
 
@@ -285,47 +282,11 @@
 <main class="app-main">
   <section class="neo-panel">
     <div class="panel-header">
-      <SlidersHorizontal class="panel-icon" size={17} />
       <h2>Capture Control</h2>
-    </div>
-
-    <div class="settings-grid">
-      <div class="setting-field">
-        <label for="sampleRate">Sample Rate</label>
-        <div class="input-wrap">
-          <input id="sampleRate" class="neo-input" type="number" min="100000" max="10000000" step="500000" bind:value={sampleRate} disabled={running} />
-          <span class="input-unit">Hz</span>
-        </div>
-        <p class="input-hint">{sampleHint}</p>
-      </div>
-
-      <div class="setting-field">
-        <label for="windowMs">Window Length</label>
-        <div class="input-wrap">
-          <input id="windowMs" class="neo-input" type="number" min="1" max="1000" step="1" bind:value={windowMs} disabled={running} />
-          <span class="input-unit">ms</span>
-        </div>
-        <p class="input-hint">{windowHint}</p>
-      </div>
-
-      <div class="setting-field">
-        <label for="cadenceMs">Cadence</label>
-        <div class="input-wrap">
-          <input id="cadenceMs" class="neo-input" type="number" min="1" max="1000" step="1" bind:value={cadenceMs} disabled={running} />
-          <span class="input-unit">ms</span>
-        </div>
-        <p class="input-hint">{cadenceHint}</p>
-      </div>
+      <span class="panel-header-meta">1 562 500 Hz · 1 ms · free-run</span>
     </div>
 
     <div class="button-row">
-      <button class="neo-btn" on:click={saveConfig} disabled={running || busy}>
-        <Save size={15} />
-        Save Config
-      </button>
-
-      <div class="btn-spacer"></div>
-
       <button class="neo-btn neo-btn-primary" on:click={startCapture} disabled={running || busy}>
         <PlayCircle size={15} />
         Start Capture
@@ -342,6 +303,33 @@
       </button>
     </div>
 
+    <div class="button-row db-test-row">
+      <button class="neo-btn neo-btn-dbtest" on:click={testDbConnection} disabled={dbTestBusy}>
+        {#if dbTestBusy}
+          <Wifi size={15} />
+          Testing…
+        {:else}
+          <Wifi size={15} />
+          Test DB Connection
+        {/if}
+      </button>
+
+      {#if dbTestResult !== null}
+        <span class={`db-test-pill ${dbTestResult.ok ? 'ok' : 'fail'}`}>
+          {#if dbTestResult.ok}
+            <Wifi size={12} />
+            CONNECTED · {dbTestResult.latency_ms} ms · HTTP {dbTestResult.http_status}
+          {:else}
+            <WifiOff size={12} />
+            FAILED · {dbTestResult.error || `HTTP ${dbTestResult.http_status}`}
+          {/if}
+        </span>
+        {#if dbTestResult.ingest_url}
+          <span class="db-test-url">{dbTestResult.ingest_url}</span>
+        {/if}
+      {/if}
+    </div>
+
     {#if alert}
       <div class={`alert-banner ${alert.kind}`}>{alert.message}</div>
     {/if}
@@ -352,6 +340,14 @@
       <Activity class="panel-icon" size={17} />
       <h2>Stream Monitor</h2>
       <span class="panel-header-meta">{activeCount} / {streams.length} active</span>
+      <button
+        class="neo-btn neo-btn-rescan"
+        on:click={rescanDevices}
+        disabled={running || rescanBusy}
+        title="Re-enumerate attached PicoScopes (stop capture first)">
+        <RotateCcw size={14} />
+        {rescanBusy ? "Scanning…" : "Rescan USB"}
+      </button>
     </div>
 
     <div class="streams-grid">
@@ -419,8 +415,8 @@
               </div>
 
               <svg class="wave-svg" viewBox="0 0 640 130" role="img" aria-label={`Waveform for ${result.bus_name}`}>
-                <path class="wave-h" d={chartPath(result.window.can_h_values_v, 640, 130, 8, result.window.can_h_values_v.length)} />
-                <path class="wave-l" d={chartPath(result.window.can_l_values_v, 640, 130, 8, result.window.can_l_values_v.length)} />
+                <path class="wave-h" d={chartPath(result.window.can_h_values_v, 640, 130, 8, result.window.can_h_values_v.length, 0, 5)} />
+                <path class="wave-l" d={chartPath(result.window.can_l_values_v, 640, 130, 8, result.window.can_l_values_v.length, 0, 5)} />
               </svg>
             {:else}
               <div class="snapshot-no-wave">No waveform captured for this bus.</div>

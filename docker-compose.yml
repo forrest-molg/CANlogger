@@ -6,7 +6,9 @@ services:
     environment:
       CANLOGGER_LOG_LEVEL: DEBUG
     ports:
-      - "8000:8000"
+      - "8001:8000"   # 8001 on host — avoids conflict with CANdatabase API on port 8000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # lets container reach host's port 8000 (CANdatabase)
     volumes:
       - ./config:/app/config
       - ./data:/data

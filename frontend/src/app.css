@@ -199,7 +199,6 @@ body {
 }
 
 .panel-header-meta {
-  margin-left: auto;
   font-size: 0.68rem;
   font-weight: 500;
   letter-spacing: 0.04em;
@@ -419,6 +418,65 @@ body {
 
 .neo-btn-danger {
   color: var(--danger);
+}
+
+.neo-btn-rescan {
+  margin-left: auto;
+  font-size: 0.75rem;
+  padding: 0.3rem 0.7rem;
+  color: var(--text-2);
+}
+
+.neo-btn-rescan:not(:disabled):hover {
+  color: var(--accent);
+}
+
+.db-test-row {
+  margin-top: 0.5rem;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.neo-btn-dbtest {
+  font-size: 0.8rem;
+  padding: 0.35rem 0.85rem;
+  color: var(--text-2);
+  border-color: var(--border);
+}
+
+.neo-btn-dbtest:not(:disabled):hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.db-test-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.25rem 0.65rem;
+  border-radius: 99px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.db-test-pill.ok {
+  background: var(--success-dim);
+  color: var(--success);
+  border: 1px solid rgba(52, 211, 153, 0.25);
+}
+
+.db-test-pill.fail {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--danger);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+}
+
+.db-test-url {
+  font-size: 0.67rem;
+  font-family: var(--mono);
+  color: var(--text-3);
 }
 
 .alert-banner {

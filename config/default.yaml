@@ -3,47 +3,50 @@ api_port: 8000
 mode: picoscope
 
 stream:
-  # Matches real PicoScope capture: 0.32 us intervals, 1 ms window, 3.2V falling edge trigger
-  sample_rate_hz: 3125000
-  window_ms: 1
-  cadence_ms: 10
+  # Sample rate tuning guide (CAN bus standard = 125 kbps → 8 µs/bit):
+  #   1_000_000 Hz →  8 samples/bit  (usable minimum)
+  #   1_562_500 Hz → 12.5 samples/bit (default — matches PicoScope 7 capture: 1563S, 100µs/div)
+  #   2_000_000 Hz → 16 samples/bit
+  #   3_125_000 Hz → 25 samples/bit
+  #   5_000_000 Hz → 40 samples/bit  (highest accuracy, ~5 MB/s compressed per bus)
+  # To change: edit sample_rate_hz here and restart, or POST /api/config while stopped.
+  sample_rate_hz: 1562500
+  window_ms: 1        # 1 ms = 1563 samples @ 1.5625 MS/s
+  cadence_ms: 1       # equal to window_ms = gapless continuous capture
   channels_per_scope: 2
-  trigger_enabled: true
+  streaming_mode: true  # ps2000 streaming: no re-arm dead time between windows
+  trigger_enabled: false  # free-run: fill and emit immediately, no edge wait
   trigger_threshold_v: 3.2
-  trigger_direction: falling
-  trigger_pre_trigger_pct: 10
+  trigger_direction: rising
+  trigger_pre_trigger_pct: 0
+  trigger_auto_ms: 50  # unused in free-run but must be a valid value
 
 storage:
   spool_dir: /data/spool
+  spool_enabled: false   # disabled — Geekom A6 is the long-term store; local JSONL at 1000 windows/s fills disk in hours
   enable_postgres_upload: false
   postgres_dsn: postgresql://postgres:postgres@postgres:5432/canlogger
   upload_batch_windows: 100
 
 geekom:
-  enabled: false
-  ingest_url: http://100.113.84.82:8000/ingest
-  bus_id: 1
+  enabled: true
+  ingest_url: http://host.docker.internal:8000/ingest  # loopback to CANdatabase on same host; use Tailscale IP when running on a separate machine
   post_timeout_s: 10
-  max_queue: 20
+  max_queue: 2000        # max windows buffered per uploader queue before dropping
+  num_upload_workers: 3  # parallel POST threads; 3 workers × 5 batch × 100 POSTs/s = 1500 windows/s
+  batch_size: 10         # windows per POST; with keep-alive sessions ~5ms/batch → 6000 windows/s capacity
 
+# Devices: one entry per channel per PicoScope (channel A = CAN-H, channel B = CAN-L).
+# serial: AUTO → assigned at startup by _probe_and_configure() via ps2000aEnumerateUnits,
+#   sorted lowest serial → CAN_BUS_1. Scopes without a bus slot appear as OFFLINE in the UI.
 devices:
-  - bus_name: CAN_BUS_1
-    serial: AUTO
-    channel: A
-    enabled: true
-  - bus_name: CAN_BUS_1
-    serial: AUTO
-    channel: B
-    enabled: true
-  - bus_name: CAN_BUS_3
-    serial: DISABLED-003
-    channel: A
-    enabled: false
-  - bus_name: CAN_BUS_4
-    serial: DISABLED-004
-    channel: A
-    enabled: false
-  - bus_name: CAN_BUS_5
-    serial: DISABLED-005
-    channel: A
-    enabled: false
+  - {bus_name: CAN_BUS_1, serial: AUTO, channel: A, enabled: true}
+  - {bus_name: CAN_BUS_1, serial: AUTO, channel: B, enabled: true}
+  - {bus_name: CAN_BUS_2, serial: AUTO, channel: A, enabled: true}
+  - {bus_name: CAN_BUS_2, serial: AUTO, channel: B, enabled: true}
+  - {bus_name: CAN_BUS_3, serial: AUTO, channel: A, enabled: true}
+  - {bus_name: CAN_BUS_3, serial: AUTO, channel: B, enabled: true}
+  - {bus_name: CAN_BUS_4, serial: AUTO, channel: A, enabled: true}
+  - {bus_name: CAN_BUS_4, serial: AUTO, channel: B, enabled: true}
+  - {bus_name: CAN_BUS_5, serial: AUTO, channel: A, enabled: true}
+  - {bus_name: CAN_BUS_5, serial: AUTO, channel: B, enabled: true}

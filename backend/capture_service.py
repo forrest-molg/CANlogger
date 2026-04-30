@@ -10,7 +10,6 @@ from config import AppConfig, DeviceConfig
 from geekom_uploader import GeekomAsyncUploader
 from models import BusWaveformWindow, RuntimeStatus, SnapshotResponse, SnapshotStreamResult, StartCaptureRequest, StreamStatus, WaveformWindow, unix_us_now
 from picoscope_driver import PicoScope2204ADriver
-from simulator import generate_window
 from storage import WindowStorage
 
 
@@ -90,9 +89,10 @@ class CaptureService:
             g = self._config.geekom
             self._geekom = GeekomAsyncUploader(
                 ingest_url=g.ingest_url,
-                bus_id=g.bus_id,
                 post_timeout_s=g.post_timeout_s,
                 max_queue=g.max_queue,
+                num_workers=g.num_upload_workers,
+                batch_size=g.batch_size,
             )
             self._geekom.start()
         if self._config.mode == "picoscope":
@@ -137,24 +137,6 @@ class CaptureService:
                     status.state = "ACTIVE"
                     status.last_error = None
                 logger.info("Capture scope worker started serial=%s channels=%s", serial, channels)
-        else:
-            for device in self._config.devices:
-                device_key = self._device_key(device)
-                status = self._status[device_key]
-                if not device.enabled:
-                    status.active = False
-                    status.state = "OFFLINE"
-                    status.last_error = "Offline (disabled in config)"
-                    logger.debug("Skipping disabled device serial=%s bus=%s", device.serial, device.bus_name)
-                    continue
-
-                task = asyncio.create_task(self._capture_loop(device), name=f"capture-{device.bus_name}-{device.channel}")
-                self._tasks[device_key] = task
-                self._task_devices[device_key] = [device_key]
-                status.active = True
-                status.state = "ACTIVE"
-                status.last_error = None
-                logger.info("Capture worker started serial=%s bus=%s", device.serial, device.bus_name)
 
         return self.runtime_status()
 
@@ -215,6 +197,35 @@ class CaptureService:
             mode=self._config.mode,
             streams=bus_streams,
             uptime_s=uptime,
+        )
+
+    def reinit_devices(self) -> None:
+        """Rebuild per-device status from current config.devices.
+
+        Called after _probe_and_configure() updates config.devices (on startup
+        and on hot-rescan).  Preserves stats for devices that were already known;
+        creates fresh IDLE/OFFLINE entries for newly discovered or removed ones.
+        """
+        new_status: dict[str, StreamStatus] = {}
+        for device in self._config.devices:
+            key = self._device_key(device)
+            if key in self._status:
+                new_status[key] = self._status[key]
+            else:
+                state = "IDLE" if device.enabled else "OFFLINE"
+                last_error = None if device.enabled else "Offline (disabled in config)"
+                new_status[key] = StreamStatus(
+                    device_serial=device.serial,
+                    bus_name=device.bus_name,
+                    channel=device.channel,
+                    active=False,
+                    state=state,
+                    last_error=last_error,
+                )
+        self._status = new_status
+        logger.info(
+            "Device status reinitialized: %d device(s) from config",
+            len(new_status),
         )
 
     def queue_size(self) -> int:
@@ -336,125 +347,11 @@ class CaptureService:
                                 window=None,
                             )
                         )
-        else:
-            devices_by_bus: dict[str, list[DeviceConfig]] = defaultdict(list)
-            for device in enabled_devices:
-                devices_by_bus[device.bus_name].append(device)
-
-            for bus_name, bus_devices in devices_by_bus.items():
-                try:
-                    by_ch: dict[str, WaveformWindow | None] = {"A": None, "B": None}
-                    for device in bus_devices:
-                        w = await asyncio.to_thread(
-                            generate_window,
-                            device,
-                            self._config.stream.sample_rate_hz,
-                            self._config.stream.window_ms,
-                            self._config.stream,
-                        )
-                        by_ch[device.channel] = w
-
-                    combined = self._combine_bus_window(bus_devices[0].serial, bus_name, by_ch.get("A"), by_ch.get("B"))
-                    for device in bus_devices:
-                        status = self._status[self._device_key(device)]
-                        status.active = False
-                        status.state = "IDLE"
-                        status.windows_captured += 1
-                        status.samples_captured += len(combined.can_h_values_v or combined.can_l_values_v)
-                        status.last_window_started_at_us = combined.started_at_us
-                        status.last_error = None
-
-                    results.append(
-                        SnapshotStreamResult(
-                            device_serial=bus_devices[0].serial,
-                            bus_name=bus_name,
-                            state="ACTIVE",
-                            captured=True,
-                            last_error=None,
-                            window=combined,
-                        )
-                    )
-                except Exception as exc:
-                    for device in bus_devices:
-                        status = self._status[self._device_key(device)]
-                        status.active = False
-                        status.state = "ERROR"
-                        status.last_error = str(exc)
-                    logger.exception("Snapshot capture failed bus=%s", bus_name)
-                    results.append(
-                        SnapshotStreamResult(
-                            device_serial=bus_devices[0].serial,
-                            bus_name=bus_name,
-                            state="ERROR",
-                            captured=False,
-                            last_error=str(exc),
-                            window=None,
-                        )
-                    )
-
         return SnapshotResponse(
             mode=self._config.mode,
             captured_at_us=unix_us_now(),
             streams=results,
         )
-
-    async def _capture_loop(self, device: DeviceConfig) -> None:
-        device_key = self._device_key(device)
-        cadence_s = self._config.stream.cadence_ms / 1000.0
-        logger.debug("Capture loop entered serial=%s cadence_s=%.4f", device.serial, cadence_s)
-        while self._running:
-            try:
-                if self._config.mode == "picoscope":
-                    window = self._pico_driver.capture_window(
-                        serial=device.serial,
-                        sample_rate_hz=self._config.stream.sample_rate_hz,
-                        window_ms=self._config.stream.window_ms,
-                    )
-                    combined = self._combine_bus_window(
-                        device.serial,
-                        device.bus_name,
-                        window if device.channel == "A" else None,
-                        window if device.channel == "B" else None,
-                    )
-                else:
-                    window = generate_window(
-                        device=device,
-                        sample_rate_hz=self._config.stream.sample_rate_hz,
-                        window_ms=self._config.stream.window_ms,
-                        stream=self._config.stream,
-                    )
-                    combined = self._combine_bus_window(
-                        device.serial,
-                        device.bus_name,
-                        window if device.channel == "A" else None,
-                        window if device.channel == "B" else None,
-                    )
-
-                await self._storage.enqueue(combined)
-                if self._geekom is not None:
-                    self._geekom.enqueue(combined)
-
-                status = self._status[device_key]
-                status.active = True
-                status.state = "ACTIVE"
-                status.windows_captured += 1
-                status.samples_captured += len(combined.can_h_values_v or combined.can_l_values_v)
-                status.last_window_started_at_us = combined.started_at_us
-                status.last_error = None
-                logger.debug(
-                    "Capture window success serial=%s samples=%s started_at_us=%s",
-                    device.serial,
-                    len(combined.can_h_values_v or combined.can_l_values_v),
-                    combined.started_at_us,
-                )
-            except Exception as exc:
-                status = self._status[device_key]
-                status.active = False
-                status.state = "ERROR"
-                status.last_error = str(exc)
-                logger.exception("Capture loop failed serial=%s", device.serial)
-
-            await asyncio.sleep(cadence_s)
 
     async def _capture_loop_scope(self, serial: str, devices: list[DeviceConfig]) -> None:
         cadence_s = self._config.stream.cadence_ms / 1000.0
@@ -462,43 +359,58 @@ class CaptureService:
         logger.debug("Scope capture loop entered serial=%s channels=%s cadence_s=%.4f", serial, channels, cadence_s)
         while self._running:
             try:
-                captured = self._pico_driver.capture_windows(
-                    serial=serial,
-                    sample_rate_hz=self._config.stream.sample_rate_hz,
-                    window_ms=self._config.stream.window_ms,
-                    channels=channels,
-                )
+                if self._pico_driver.is_streaming(serial):
+                    # Streaming mode: batch-drain the window queue to avoid asyncio.to_thread
+                    # overhead at 1000 windows/second.  drain_stream_windows blocks up to 50ms
+                    # waiting for the first window, then greedily returns up to 64 more.
+                    captured_batch: list[dict] = await asyncio.to_thread(
+                        self._pico_driver.drain_stream_windows,
+                        serial,
+                    )
+                else:
+                    # Block mode: arm → poll → retrieve (returns one window).
+                    captured_batch = [await asyncio.to_thread(
+                        self._pico_driver.capture_windows,
+                        serial,
+                        self._config.stream.sample_rate_hz,
+                        self._config.stream.window_ms,
+                        channels,
+                    )]
 
-                for device in devices:
-                    device_key = self._device_key(device)
-                    status = self._status[device_key]
-                    window = captured.get(device.channel)
-                    if window is None:
-                        status.active = False
-                        status.state = "ERROR"
-                        status.last_error = f"No captured data for channel {device.channel}"
-                        continue
+                if not captured_batch:
+                    continue
 
-                    window = window.model_copy(update={"bus_name": device.bus_name, "channel": device.channel, "device_serial": device.serial})
-                    captured[device.channel] = window
+                for captured in captured_batch:
+                    for device in devices:
+                        device_key = self._device_key(device)
+                        status = self._status[device_key]
+                        window = captured.get(device.channel)
+                        if window is None:
+                            status.active = False
+                            status.state = "ERROR"
+                            status.last_error = f"No captured data for channel {device.channel}"
+                            continue
 
-                buses: dict[str, dict[str, WaveformWindow | None]] = defaultdict(lambda: {"A": None, "B": None})
-                for device in devices:
-                    buses[device.bus_name][device.channel] = captured.get(device.channel)
+                        window = window.model_copy(update={"bus_name": device.bus_name, "channel": device.channel, "device_serial": device.serial})
+                        captured[device.channel] = window
 
-                for bus_name, by_ch in buses.items():
-                    combined = self._combine_bus_window(serial, bus_name, by_ch.get("A"), by_ch.get("B"))
-                    await self._storage.enqueue(combined)
-                    if self._geekom is not None:
-                        self._geekom.enqueue(combined)
-                    for device in [d for d in devices if d.bus_name == bus_name]:
-                        status = self._status[self._device_key(device)]
-                        status.active = True
-                        status.state = "ACTIVE"
-                        status.windows_captured += 1
-                        status.samples_captured += len(combined.can_h_values_v or combined.can_l_values_v)
-                        status.last_window_started_at_us = combined.started_at_us
-                        status.last_error = None
+                    buses: dict[str, dict[str, WaveformWindow | None]] = defaultdict(lambda: {"A": None, "B": None})
+                    for device in devices:
+                        buses[device.bus_name][device.channel] = captured.get(device.channel)
+
+                    for bus_name, by_ch in buses.items():
+                        combined = self._combine_bus_window(serial, bus_name, by_ch.get("A"), by_ch.get("B"))
+                        await self._storage.enqueue(combined)
+                        if self._geekom is not None:
+                            self._geekom.enqueue(combined)
+                        for device in [d for d in devices if d.bus_name == bus_name]:
+                            status = self._status[self._device_key(device)]
+                            status.active = True
+                            status.state = "ACTIVE"
+                            status.windows_captured += 1
+                            status.samples_captured += len(combined.can_h_values_v or combined.can_l_values_v)
+                            status.last_window_started_at_us = combined.started_at_us
+                            status.last_error = None
             except Exception as exc:
                 for device in devices:
                     status = self._status[self._device_key(device)]
@@ -506,5 +418,5 @@ class CaptureService:
                     status.state = "ERROR"
                     status.last_error = str(exc)
                 logger.exception("Scope capture loop failed serial=%s", serial)
-
-            await asyncio.sleep(cadence_s)
+                # Back off on error to avoid a tight failure loop; no sleep on success.
+                await asyncio.sleep(1.0)

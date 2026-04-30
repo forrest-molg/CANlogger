@@ -47,7 +47,8 @@ class WindowStorage:
             while len(batch) < self._settings.upload_batch_windows and not self._queue.empty():
                 batch.append(self._queue.get_nowait())
 
-            self._write_spool_batch(batch)
+            if self._settings.spool_enabled:
+                self._write_spool_batch(batch)
             if self._settings.enable_postgres_upload:
                 await self._upload_postgres_batch(batch)
 

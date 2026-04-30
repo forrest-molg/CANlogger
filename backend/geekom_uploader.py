@@ -4,6 +4,20 @@ Compresses and POSTs BusWaveformWindow data to the Geekom A6 ingest endpoint
 over Tailscale.  Runs the HTTP POST in a background thread so the capture loop
 is never blocked.
 
+Wire format — one JSON object per bus window:
+  [
+    {
+      "time_utc":      "2026-04-29T15:30:00.123456+00:00",
+      "bus_id":        1,
+      "n_samples":     1563,
+      "samples_h_b64": "<base64(lz4(int16 CAN-H))",
+      "samples_l_b64": "<base64(lz4(int16 CAN-L))"
+    }
+  ]
+
+Both sides agree that sample_rate = _WIRE_SAMPLE_RATE (1 562 500 Hz).
+The Geekom API splits each object into two DB rows (channel='H' and 'L').
+
 Usage (from capture_service.py):
     uploader = GeekomAsyncUploader(settings)
     uploader.start()
@@ -31,6 +45,10 @@ logger = logging.getLogger(__name__)
 _MAX_ADC = 32767
 _RANGE_V = 5.0  # volts full-scale (PS2000A_5V range)
 
+# Fixed sample rate agreed between CANlogger and CANdatabase.
+# Not sent over the wire — the Geekom API hardcodes this on insert.
+_WIRE_SAMPLE_RATE = 1_562_500
+
 
 def _volts_to_int16(values_v: list[float]) -> np.ndarray:
     """Convert float voltage array back to little-endian int16 ADC counts."""
@@ -46,40 +64,48 @@ def _pack_samples(values_v: list[float]) -> str:
     return base64.b64encode(compressed).decode("ascii")
 
 
-def _build_chunk(channel: str, t_utc: datetime, sample_rate: int, values_v: list[float], bus_id: int) -> dict:
-    return {
-        "time_utc": t_utc.isoformat(),
-        "bus_id": bus_id,
-        "channel": channel,
-        "sample_rate": sample_rate,
-        "n_samples": len(values_v),
-        "samples_b64": _pack_samples(values_v),
-    }
+# One persistent HTTP session per worker thread — avoids TCP reconnect overhead.
+_thread_session = threading.local()
 
 
-def _upload(window: BusWaveformWindow, ingest_url: str, bus_id: int, post_timeout_s: int) -> bool:
-    """Build and POST both CAN-H and CAN-L chunks for one window."""
-    t_utc = datetime.fromtimestamp(window.started_at_us / 1_000_000, tz=timezone.utc)
-    chunks = []
-    if window.can_h_values_v:
-        chunks.append(_build_chunk("H", t_utc, window.sample_rate_hz, window.can_h_values_v, bus_id))
-    if window.can_l_values_v:
-        chunks.append(_build_chunk("L", t_utc, window.sample_rate_hz, window.can_l_values_v, bus_id))
-    if not chunks:
+def _get_session() -> requests.Session:
+    """Return (or create) the per-thread requests.Session with keep-alive."""
+    if not hasattr(_thread_session, "session"):
+        s = requests.Session()
+        # Increase pool size to handle bursts without connection cycling.
+        adapter = requests.adapters.HTTPAdapter(pool_connections=1, pool_maxsize=4)
+        s.mount("http://", adapter)
+        s.mount("https://", adapter)
+        _thread_session.session = s
+    return _thread_session.session
+
+
+def _upload_batch(windows: list[BusWaveformWindow], ingest_url: str, post_timeout_s: int) -> bool:
+    """Build and POST a batch of combined H+L bus-window objects."""
+    payload = []
+    for window in windows:
+        if not window.can_h_values_v and not window.can_l_values_v:
+            continue
+        bus_id = int(window.bus_name.split("_")[-1])
+        t_utc = datetime.fromtimestamp(window.started_at_us / 1_000_000, tz=timezone.utc)
+        n_samples = max(len(window.can_h_values_v), len(window.can_l_values_v))
+        payload.append({
+            "time_utc":      t_utc.isoformat(),
+            "bus_id":        bus_id,
+            "n_samples":     n_samples,
+            "samples_h_b64": _pack_samples(window.can_h_values_v) if window.can_h_values_v else "",
+            "samples_l_b64": _pack_samples(window.can_l_values_v) if window.can_l_values_v else "",
+        })
+    if not payload:
         return True
-
     try:
-        resp = requests.post(ingest_url, json=chunks, timeout=post_timeout_s)
+        session = _get_session()
+        resp = session.post(ingest_url, json=payload, timeout=post_timeout_s)
         resp.raise_for_status()
-        logger.debug(
-            "Geekom upload OK bus=%s t_utc=%s inserted=%s",
-            window.bus_name,
-            t_utc.isoformat(),
-            resp.json().get("inserted"),
-        )
+        logger.debug("Geekom batch upload OK n=%d inserted=%s", len(payload), resp.json().get("inserted"))
         return True
     except requests.RequestException as exc:
-        logger.warning("Geekom upload failed bus=%s — %s", window.bus_name, exc)
+        logger.warning("Geekom batch upload failed n=%d — %s", len(payload), exc)
         return False
 
 
@@ -91,20 +117,27 @@ class GeekomAsyncUploader:
     as warnings but capture continues uninterrupted.
     """
 
-    def __init__(self, ingest_url: str, bus_id: int, post_timeout_s: int, max_queue: int) -> None:
+    def __init__(self, ingest_url: str, post_timeout_s: int, max_queue: int, num_workers: int = 3, batch_size: int = 10) -> None:
         self._ingest_url = ingest_url
-        self._bus_id = bus_id
         self._post_timeout_s = post_timeout_s
+        self._num_workers = num_workers
+        self._batch_size = batch_size
         self._q: queue.Queue[BusWaveformWindow | None] = queue.Queue(maxsize=max_queue)
-        self._thread = threading.Thread(target=self._worker, name="geekom-uploader", daemon=True)
+        self._threads: list[threading.Thread] = [
+            threading.Thread(target=self._worker, name=f"geekom-uploader-{i}", daemon=True)
+            for i in range(num_workers)
+        ]
 
     def start(self) -> None:
-        self._thread.start()
-        logger.info("Geekom async uploader started url=%s bus_id=%s", self._ingest_url, self._bus_id)
+        for t in self._threads:
+            t.start()
+        logger.info("Geekom async uploader started url=%s workers=%d batch_size=%d", self._ingest_url, self._num_workers, self._batch_size)
 
     def stop(self) -> None:
-        self._q.put(None)  # sentinel
-        self._thread.join(timeout=15)
+        for _ in self._threads:
+            self._q.put(None)  # one sentinel per worker
+        for t in self._threads:
+            t.join(timeout=15)
         logger.info("Geekom async uploader stopped")
 
     def enqueue(self, window: BusWaveformWindow) -> None:
@@ -119,7 +152,20 @@ class GeekomAsyncUploader:
 
     def _worker(self) -> None:
         while True:
+            # Block until at least one window is available.
             item = self._q.get()
             if item is None:
                 break
-            _upload(item, self._ingest_url, self._bus_id, self._post_timeout_s)
+            batch = [item]
+            # Drain up to (batch_size - 1) more windows without blocking.
+            for _ in range(self._batch_size - 1):
+                try:
+                    extra = self._q.get_nowait()
+                    if extra is None:
+                        # Sentinel reached — put it back and stop after this batch.
+                        self._q.put(None)
+                        break
+                    batch.append(extra)
+                except queue.Empty:
+                    break
+            _upload_batch(batch, self._ingest_url, self._post_timeout_s)

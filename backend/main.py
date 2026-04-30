@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -30,9 +31,14 @@ FRONTEND_DIST_DIR = PROJECT_ROOT / "frontend" / "dist"
 FRONTEND_DIST_ASSETS_DIR = FRONTEND_DIST_DIR / "assets"
 
 def _probe_and_configure(cfg: AppConfig) -> None:
-    """Enumerate attached PicoScope 2204A units and assign them to bus slots.
+    """Enumerate attached PicoScope units and assign them to bus slots.
 
-    Serials are sorted lowest-first so the lowest serial number always becomes
+    Tries ps2000a enumerate first (preferred — returns serials directly).
+    If that finds nothing, falls back to the legacy ps2000 library, which is
+    required for some 2204A firmware/host combinations where ps2000a cannot
+    enumerate but ps2000_open_unit succeeds.
+
+    Serials are sorted lowest-first so the lowest serial always becomes
     CAN_BUS_1.  Bus slots with no detected scope are disabled so the UI shows
     them as OFFLINE.  This runs only when mode == 'picoscope'.
     """
@@ -41,20 +47,80 @@ def _probe_and_configure(cfg: AppConfig) -> None:
 
     import ctypes
 
+    _MAX_BUSES = 5
     detected: list[str] = []
+
+    # --- ps2000a enumerate (preferred: returns serials without opening units) ---
     try:
         from picosdk.ps2000a import ps2000a as ps  # type: ignore
 
         count = ctypes.c_int16(0)
         serials_len = ctypes.c_int16(1024)
         serials_buf = ctypes.create_string_buffer(1024)
-        ps.ps2000aEnumerateUnits(ctypes.byref(count), serials_buf, ctypes.byref(serials_len))
-        raw = serials_buf.value.decode("utf-8", errors="ignore")
-        detected = sorted(s.strip() for s in raw.split(",") if s.strip())
+        status = int(ps.ps2000aEnumerateUnits(ctypes.byref(count), serials_buf, ctypes.byref(serials_len)))
+        if status == 0 and int(count.value) > 0:
+            raw = serials_buf.value.decode("utf-8", errors="ignore")
+            detected = sorted(s.strip() for s in raw.split(",") if s.strip())
+            logger.info("ps2000a enumeration: %d scope(s) found: %s", len(detected), detected)
+        else:
+            logger.info(
+                "ps2000a enumeration returned status=%d count=%d — trying ps2000 fallback",
+                status, int(count.value),
+            )
     except Exception as exc:
-        logger.warning("PicoScope enumeration failed at startup: %s — all buses will be OFFLINE", exc)
+        logger.warning("ps2000a enumeration failed: %s — trying ps2000 fallback", exc)
 
-    _MAX_BUSES = 5
+    # --- ps2000 legacy fallback (needed when ps2000a cannot enumerate) ---
+    # Note: ps2000aOpenUnit with a specific serial (from this path) returns
+    # PICO_NOT_FOUND in ~5 ms, so open_device() falls through to ps2000
+    # quickly without hanging.
+    if not detected:
+        # Count PicoTech USB devices in sysfs first — avoids blocking ps2000_open_unit
+        # calls when no scopes are physically connected (each call can hang for ~12s).
+        sys_usb = Path("/sys/bus/usb/devices")
+        pico_usb_count = 0
+        try:
+            for _dev in sys_usb.iterdir():
+                _vf = _dev / "idVendor"
+                if _vf.exists() and _vf.read_text(encoding="utf-8").strip().lower() == "0ce9":
+                    pico_usb_count += 1
+        except Exception:
+            pass
+        logger.debug("PicoTech USB devices found in sysfs: %d", pico_usb_count)
+
+        if pico_usb_count == 0:
+            logger.info("No PicoTech USB devices in sysfs — skipping ps2000 probe")
+        else:
+            try:
+                from picosdk.ps2000 import ps2000 as ps_legacy  # type: ignore
+
+                handles: list[tuple[ctypes.c_int16, str]] = []
+                for slot in range(min(pico_usb_count, _MAX_BUSES)):
+                    handle_val = int(ps_legacy.ps2000_open_unit())
+                    if handle_val <= 0:
+                        break  # no more scopes available
+                    handle = ctypes.c_int16(handle_val)
+                    # info type 4 = BATCH_AND_SERIAL (e.g. "12451/0401")
+                    serial_buf = ctypes.create_string_buffer(128)
+                    ps_legacy.ps2000_get_unit_info(handle, serial_buf, ctypes.c_int16(128), ctypes.c_int16(4))
+                    serial = serial_buf.value.decode("utf-8", errors="ignore").strip()
+                    if not serial:
+                        serial = f"PS2000-{slot + 1:03d}"
+                    handles.append((handle, serial))
+                    logger.debug("ps2000 detected scope handle=%d serial=%s", handle_val, serial)
+
+                for handle, _ in handles:
+                    ps_legacy.ps2000_close_unit(handle)
+
+                detected = sorted(serial for _, serial in handles)
+                if detected:
+                    logger.info("ps2000 fallback enumeration: %d scope(s) found: %s", len(detected), detected)
+                else:
+                    logger.warning("ps2000 fallback found no scopes despite %d USB device(s) — all buses will be OFFLINE", pico_usb_count)
+            except Exception as exc:
+                logger.warning("ps2000 fallback enumeration failed: %s — all buses will be OFFLINE", exc)
+
+    # --- Assign detected serials to bus slots ---
     new_devices: list[DeviceConfig] = []
     for slot in range(_MAX_BUSES):
         bus_name = f"CAN_BUS_{slot + 1}"
@@ -75,12 +141,21 @@ def _probe_and_configure(cfg: AppConfig) -> None:
 
 
 config: AppConfig = load_config(CONFIG_PATH)
-_probe_and_configure(config)
 capture_service = CaptureService(config)
 
-logger.info("CANlogger API starting with log level %s", LOG_LEVEL)
+logger.info("CANlogger API initializing — USB probe will run after server starts")
 
-app = FastAPI(title="CANlogger API", version="0.1.0")
+
+@asynccontextmanager
+async def _lifespan(app_: FastAPI):
+    """Probe for PicoScope devices in a thread so the event loop isn't blocked."""
+    await asyncio.to_thread(_probe_and_configure, config)
+    capture_service.reinit_devices()
+    logger.info("CANlogger API ready — log level %s", LOG_LEVEL)
+    yield
+
+
+app = FastAPI(title="CANlogger API", version="0.1.0", lifespan=_lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -164,3 +239,61 @@ async def pico_diagnostics() -> dict:
 async def pico_diagnostics_deep() -> dict:
     # Explicit deep probe includes live driver open attempts.
     return await asyncio.to_thread(run_pico_diagnostics, True)
+
+
+@app.get("/api/geekom/test")
+async def test_geekom_connection() -> dict:
+    """Test connectivity to the CANdatabase ingest server.
+
+    Attempts a HEAD request to /health on the configured ingest URL base,
+    then falls back to GET.  Returns latency, HTTP status, and config values
+    so the frontend can display a clear PASS / FAIL banner.
+    """
+    import time
+    import urllib.error
+    import urllib.request
+
+    base_url = config.geekom.ingest_url.rstrip("/").rsplit("/ingest", 1)[0]
+    health_url = f"{base_url}/health"
+
+    start = time.monotonic()
+    http_status: int | None = None
+    error_detail: str | None = None
+
+    try:
+        req = urllib.request.Request(health_url, method="GET")
+        with urllib.request.urlopen(req, timeout=config.geekom.post_timeout_s) as resp:
+            http_status = resp.status
+    except urllib.error.HTTPError as exc:
+        http_status = exc.code
+    except Exception as exc:
+        error_detail = str(exc)
+
+    latency_ms = round((time.monotonic() - start) * 1000, 1)
+    ok = http_status is not None and http_status < 500
+
+    return {
+        "ok": ok,
+        "http_status": http_status,
+        "latency_ms": latency_ms,
+        "error": error_detail,
+        "ingest_url": config.geekom.ingest_url,
+        "geekom_enabled": config.geekom.enabled,
+        "health_url": health_url,
+    }
+
+
+@app.post("/api/devices/rescan")
+async def rescan_devices() -> dict:
+    """Re-enumerate attached PicoScope units and update bus assignments.
+
+    Can be called without restarting the container whenever scopes are plugged
+    or unplugged.  Capture must be stopped first.
+    """
+    if capture_service.runtime_status().running:
+        raise HTTPException(status_code=409, detail="Stop capture before rescanning devices")
+    await asyncio.to_thread(_probe_and_configure, config)
+    capture_service.reinit_devices()
+    runtime = capture_service.runtime_status().model_dump(mode="json")
+    runtime["storage_queue"] = capture_service.queue_size()
+    return runtime
