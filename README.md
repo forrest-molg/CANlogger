@@ -39,6 +39,48 @@ CANlogger is purely a capture transport — it does **no protocol decoding**. De
 - **Svelte setup GUI** bundled into the container — accessible at port 8001.
 - **Docker Compose packaging** for repeatable deployment on any Linux host.
 
+## Performance & Data Rates
+
+All figures use the default config (`sample_rate_hz: 1562500`, `window_ms: 1`, `cadence_ms: 1`, `channels_per_scope: 2`, `batch_size: 10`, `num_upload_workers: 3`).
+
+### ADC sampling
+
+| Parameter | Value | Derivation |
+|---|---|---|
+| Sample rate | **1,562,500 Hz** (1.5625 MS/s) | `stream.sample_rate_hz` |
+| Samples per CAN bit (125 kbps) | **12.5** | 1,562,500 ÷ 125,000 |
+| Samples per 1 ms window | **1,563** | 1,562,500 × 0.001 (rounded up) |
+| Raw bytes per window (int16) | **3,126 bytes** | 1,563 × 2 |
+| Channels per scope | **2** | CAN-H (ch A) + CAN-L (ch B) |
+| Raw throughput per channel | **3.125 MB/s** | 1,562,500 × 2 bytes |
+| Raw throughput per bus (2 ch) | **6.25 MB/s** | |
+| Raw throughput, 5 buses | **31.25 MB/s** | |
+
+### LZ4 compression (wire format)
+
+Each 1 ms window is LZ4-compressed before sending. CAN signals are near-constant voltage (idle = recessive ≈ 0 V, active ≈ 3.5 V differential) with typical bus utilisation of 10–40 %. Observed compression ratios are **4× to 10×**.
+
+| Bus utilisation | Approx LZ4 ratio | Compressed bytes/window/channel | KB/s per channel |
+|---|---|---|---|
+| Low (< 10 % bus load) | ~10× | ~310 bytes | ~310 KB/s |
+| Typical (20–40 %) | ~5× | ~625 bytes | ~625 KB/s |
+| Heavy (> 80 %) | ~2.5× | ~1,250 bytes | ~1,250 KB/s |
+
+### Network: capture machine → candb (Tailscale or LAN)
+
+Traffic is HTTP POST (`/ingest`) carrying JSON-wrapped base64 LZ4 chunks. Each POST contains `batch_size = 10` windows for one bus (both channels). HTTP keep-alive sessions are reused, so per-request overhead is ~200–400 bytes.
+
+| Scenario | POSTs/s per bus | Payload MB/s per bus | Payload MB/s, 5 buses |
+|---|---|---|---|
+| Typical (5× LZ4) | 200 | **~1.3 MB/s** | **~6.5 MB/s** |
+| Heavy (2.5× LZ4) | 200 | ~2.6 MB/s | ~13 MB/s |
+
+**Upload capacity headroom** (3 workers × keep-alive, ~5 ms/POST → 200 POSTs/worker/s): 600 POSTs/s × 10 windows = **6,000 windows/s**, vs the 2,000 windows/s produced by one fully-loaded bus — **3× headroom per bus**. At 5 buses (10,000 windows/s) with `num_upload_workers: 3` you will want to increase workers or accept occasional queue growth during bursts.
+
+### Upload queue sizing
+
+`geekom.max_queue: 2000` — if candb is unreachable for up to ~0.1 s (at 10,000 windows/s, 5 buses) the queue absorbs the backlog without dropping windows. Older windows are dropped first when the queue is full.
+
 ## Hardware Requirements
 
 | Item | Details |
