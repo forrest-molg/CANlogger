@@ -1,5 +1,56 @@
 # CANlogger
 
+CANlogger is the **capture daemon** in the CAN bus waveform recording system. It runs on any Linux PC with one or more PicoScope 2204A oscilloscopes attached via USB. It samples CAN-H and CAN-L continuously at 1.5625 MS/s (12.5 samples per CAN bit at 125 kbps), packages each 1 ms of waveform into a compressed chunk, and streams those chunks to the [CANdatabase backend](https://github.com/forrest-molg/candb) over HTTP in real time.
+
+## System Context
+
+```
+ ┌─────────────────────────────────────────────────┐
+ │  Capture machine (any Linux PC)                 │
+ │                                                 │
+ │  PicoScope 2204A ──USB──► canlogger-app         │
+ │  (up to 5 scopes, 2 ch each)  (Docker)          │
+ │        │                         │              │
+ │        │ 1.5625 MS/s             │ POST /ingest │
+ │        │ CAN-H + CAN-L           ▼              │
+ └────────┼─────────────────────────┼──────────────┘
+          │                         │  (same host or Tailscale)
+          │                    ┌────▼───────────────────┐
+          │                    │  candb (Geekom A6)     │
+          │                    │  TimescaleDB + FastAPI │
+          │                    └────────────────────────┘
+          │                              │
+          └──── raw CAN-H/L voltage      │  decoded + stored
+                (not decoded here)       ▼
+                                  canui waveform viewer
+```
+
+CANlogger is purely a capture transport — it does **no protocol decoding**. Decoding happens server-side in candb so the decoder can be improved without touching the capture hardware.
+
+## What Is Implemented
+
+- **PicoScope 2204A capture** via `picosdk` using the `ps2000` legacy API (with automatic ps2000a fallback). The `ps2000` streaming mode is used for gapless continuous capture — no re-arm dead time between 1 ms windows.
+- **Automatic scope enumeration** at startup via `ps2000aEnumerateUnits`, falling back to legacy USB sysfs counting if ps2000a cannot enumerate. Scopes are sorted by serial number and assigned to bus slots 1–5 lowest-first.
+- **Two channels per scope**: channel A = CAN-H, channel B = CAN-L. Both are captured simultaneously.
+- **Up to 5 buses** (5 PicoScopes × 2 channels = 10 signal streams).
+- **Geekom uploader**: each 1 ms window is LZ4-compressed, base64-encoded, and POSTed to candb in batches of 10. Three worker threads give ~1500 windows/s upload capacity with keep-alive HTTP sessions.
+- **Local spool** (JSONL files) as an optional overflow buffer (disabled by default — at 1000 windows/s the disk fills in hours).
+- **FastAPI control API** for start/stop, config read/write, stream status, and PicoScope diagnostics.
+- **Svelte setup GUI** bundled into the container — accessible at port 8001.
+- **Docker Compose packaging** for repeatable deployment on any Linux host.
+
+## Hardware Requirements
+
+| Item | Details |
+|---|---|
+| PicoScope 2204A | USB 2.0, firmware `2204A/060`, USB ID `0ce9:1007` |
+| Host OS | Ubuntu 22.04 / Debian 12 or newer (64-bit) |
+| Docker Engine | v24+ with Compose plugin |
+| USB | Direct passthrough — no USB hub between scope and host |
+| CAN bus | 125 kbps standard frame (ISO 11898-1) |
+
+A udev rule (`scripts/99-picoscope.rules`) grants non-root access to PicoScope devices.
+
 ## Install on Any Linux PC (Ubuntu / Debian)
 
 Run these commands in order on a fresh machine. Nothing else is required.
@@ -106,182 +157,169 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-CANlogger is a transferable multi-stream waveform logger designed for a mini PC that will run continuously for weeks. This first implementation provides:
-
-- 5 parallel stream workers (PicoScope mode implemented, simulator still available)
-- Adjustable snapshot capture settings: sample rate, window duration, and cadence
-- Precise microsecond window timestamps
-- Durable local spool files for high-rate waveform windows
-- Optional PostgreSQL upload path (feature flag)
-- Svelte-based setup GUI for start/stop and config
-- Docker Compose packaging for easy transfer to another machine
-
-## Why 5 MS/s at 125 kbps
-
-For CAN at 125 kbps, bit time is 8 microseconds.
-
-- At 5 MS/s, sample period is 0.2 microseconds
-- Samples per bit = 8 / 0.2 = 40 samples/bit
-
-This provides strong signal-integrity visibility without pushing data rates as high as the hardware maximum.
-
-## Current Scope
-
-Implemented now:
-
-- Simulator-based end-to-end pipeline for validation
-- PicoScope 2204A block capture path via `picosdk` + `libps2000a`
-- API and GUI for setup and runtime monitoring
-- Dockerized app + PostgreSQL service
-- Local spool persistence in JSONL windows
-
-Planned next (hardware-on-desk phase):
-
-- Add live scope discovery and serial auto-mapping from USB
-- Add reconnect handling tied to actual device behavior
 
 ## Project Structure
 
-- backend/main.py: FastAPI service and control API
-- backend/config.py: typed config load/save from config/default.yaml
-- backend/capture_service.py: parallel worker orchestration
-- backend/simulator.py: synthetic CAN-like waveform generation
-- backend/storage.py: spool writer and optional PostgreSQL uploader
-- backend/picoscope_driver.py: PicoScope integration contract stub
-- config/default.yaml: editable runtime defaults for 5 buses
-- frontend/src/App.svelte: control panel UI
-- frontend/src/app.css: neumorphic dark theme
-- frontend/src/main.js: Svelte entrypoint
-- frontend/package.json: frontend dependency and build configuration
-- scripts/init_db.sql: PostgreSQL schema bootstrap
-- docker-compose.yml: portable deployment
-- start.sh: start stack
-- stop.sh: stop stack
+```
+CANlogger/
+├── backend/
+│   ├── main.py              # FastAPI service: control API + GUI file server
+│   ├── config.py            # Typed Pydantic config (load/save config/default.yaml)
+│   ├── capture_service.py   # Parallel worker orchestration — one thread per bus channel
+│   ├── picoscope_driver.py  # PicoScope 2204A driver (ps2000a + ps2000 legacy fallback)
+│   ├── geekom_uploader.py   # HTTP upload queue: LZ4+base64 POSTs to candb /ingest
+│   ├── storage.py           # Local JSONL spool writer (overflow buffer, normally off)
+│   ├── diagnostics.py       # USB device enumeration and driver health reporting
+│   └── models.py            # Shared Pydantic data models
+├── config/
+│   └── default.yaml         # Editable runtime configuration (survives container restarts)
+├── frontend/
+│   └── src/App.svelte       # Svelte control panel (start/stop, config, stream status)
+├── scripts/
+│   ├── 99-picoscope.rules   # udev rule: grant non-root USB access to PicoScope
+│   └── init_db.sql          # Optional local PostgreSQL schema bootstrap
+├── docker-compose.yml       # Two services: canlogger-app + canlogger-postgres
+├── Dockerfile
+├── start.sh / stop.sh
+└── install.sh               # One-line installer from GitHub release bundle
+```
 
 ## Quick Start
 
-1. Open a terminal in Documents/CANlogger.
-2. Start the stack:
+### 1. Install dependencies
 
 ```bash
-chmod +x start.sh stop.sh
+sudo apt update
+sudo apt install -y curl ca-certificates gnupg lsb-release git
+
+# Docker Engine
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+  | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo apt update && sudo apt install -y docker-ce docker-ce-cli containerd.io \
+  docker-buildx-plugin docker-compose-plugin
+sudo usermod -aG docker $USER && newgrp docker
+
+# PicoScope udev rule (grants USB access without sudo)
+sudo cp scripts/99-picoscope.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+### 2. Configure the candb ingest target
+
+Edit `config/default.yaml` and set the address of the machine running candb:
+
+```yaml
+geekom:
+  enabled: true
+  ingest_url: http://<candb-host-ip>:8000/ingest
+```
+
+If both services run on the same machine, leave it as `host.docker.internal:8000/ingest`.
+
+### 3. Start
+
+```bash
 ./start.sh
 ```
 
-3. Open:
+Open the GUI at **http://localhost:8001** — click **Start Capture** to begin recording.
 
-- GUI: http://localhost:8000
-- API docs: http://localhost:8000/docs
+API docs: **http://localhost:8001/docs**
 
-4. In the GUI:
-
-- Confirm sample rate/window/cadence
-- Click Save Config
-- Click Start Capture
-- Watch per-stream counters increment
-
-Note: the frontend is built automatically in Docker; no manual Node steps are required on the mini PC.
-
-5. Stop stack when done:
+### 4. Stop
 
 ```bash
 ./stop.sh
 ```
 
-## Configuration
+## Configuration Reference
 
-Main runtime settings are in config/default.yaml.
+All settings live in `config/default.yaml`. Changes take effect after restarting the stack. Most fields can also be written live via `POST /api/config` while capture is stopped.
 
-Key fields:
+| Setting | Default | Description |
+|---|---|---|
+| `stream.sample_rate_hz` | `1562500` | ADC sample rate. 1.5625 MS/s = 12.5 samples/bit @ 125 kbps. |
+| `stream.window_ms` | `1` | Length of each waveform chunk (ms). |
+| `stream.cadence_ms` | `1` | Target interval between chunk starts — equal to window = gapless. |
+| `stream.channels_per_scope` | `2` | 1 = CAN-H only, 2 = CAN-H + CAN-L. |
+| `stream.streaming_mode` | `true` | Use ps2000 streaming API (gapless). Set `false` for block-mode snapshots. |
+| `geekom.enabled` | `true` | Enable upload to candb. |
+| `geekom.ingest_url` | `http://host.docker.internal:8000/ingest` | candb ingest endpoint. |
+| `geekom.batch_size` | `10` | Windows per POST. |
+| `geekom.num_upload_workers` | `3` | Parallel POST threads. |
+| `storage.spool_enabled` | `false` | Write JSONL spool files locally (overflow buffer — fills disk fast). |
+| `devices` | 5 × AUTO | One entry per channel. `serial: AUTO` = assigned by startup probe. |
 
-- stream.sample_rate_hz: default 5000000
-- stream.window_ms: default 10
-- stream.cadence_ms: default 10
-- storage.enable_postgres_upload: default false
-- devices: five buses with serial placeholders
+### Sample Rate Guide (125 kbps CAN)
 
-To change settings while stopped, edit config/default.yaml.
-To change settings in app, use GUI Save Config.
+| `sample_rate_hz` | Samples per bit | Notes |
+|---|---|---|
+| `1000000` | 8 | Usable minimum |
+| `1562500` | **12.5** | **Default — matches PicoScope 7 capture setting** |
+| `2000000` | 16 | |
+| `3125000` | 25 | |
+| `5000000` | 40 | Highest accuracy; ~5 MB/s compressed per bus |
 
-## Data Model (Current)
+## API Reference
 
-Each captured window contains:
+The FastAPI service runs on port 8000 inside the container (port 8001 on the host).
 
-- device serial
-- bus name
-- channel
-- sample rate
-- sample interval (ns)
-- window length (ms)
-- window start timestamp (us)
-- voltage samples array
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/capture/status` | Stream states for all buses (ACTIVE / IDLE / ERROR / OFFLINE) |
+| `POST` | `/api/capture/start` | Start capture on all enabled buses |
+| `POST` | `/api/capture/stop` | Stop capture |
+| `GET` | `/api/config` | Read current config |
+| `POST` | `/api/config` | Update config (capture must be stopped) |
+| `GET` | `/api/diagnostics` | PicoScope USB diagnostics |
 
-Spool output path (inside container): /data/spool/YYYY-MM-DD/windows-HH.jsonl
+## Troubleshooting
 
-## PostgreSQL Notes
-
-The schema is created by scripts/init_db.sql.
-
-Raw waveform payload is currently written as JSONB when storage.enable_postgres_upload=true.
-This is intentionally optional because high-rate raw insert volume can overwhelm a DB if always enabled.
-
-Recommended production posture:
-
-- Keep local spool as primary high-rate sink
-- Upload selected/compacted windows to PostgreSQL asynchronously
-
-## Run Without Docker (Developer Mode)
+**Stream shows ERROR instead of ACTIVE**
 
 ```bash
-cd frontend
-npm install
-npm run build
+docker logs canlogger-app --tail 50
+# Look for: "ps2000a enumeration" or "ps2000 fallback" lines
+curl http://localhost:8001/api/diagnostics
+```
 
+**PicoScope not detected**
+
+- Confirm USB device is visible: `lsusb | grep 0ce9`
+- Confirm udev rule is installed: `ls /etc/udev/rules.d/99-picoscope.rules`
+- Try replugging the scope — the driver needs a 2-second USB settle delay on first connect.
+
+**Upload queue backing up**
+
+Check the candb machine is reachable: `curl http://<candb-ip>:8000/health`
+
+## Developer Workflow
+
+```bash
+# Run outside Docker (no USB required — useful for API/GUI dev)
 cd backend
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -U pip
+python3 -m venv .venv && . .venv/bin/activate
 pip install -e .
 uvicorn main:app --host 0.0.0.0 --port 8000
+
+# Frontend dev server
+cd frontend
+npm install && npm run dev
 ```
 
-## Hardware Integration Plan
+## Releasing a New Version
 
-Current single-device bring-up (CAN H on channel A):
-
-1. Keep mode in config/default.yaml as:
-
-```yaml
-mode: picoscope
+```bash
+# On the develop branch, when ready to release:
+git checkout main
+git merge develop
+git tag -a v1.1 -m "v1.1 release notes here"
+git push origin main && git push origin v1.1
 ```
 
-2. Enable `CAN_BUS_1` on channel `A` and set `CAN_BUS_2..5` to `enabled: false`.
-3. Start with `./start.sh` and confirm stream states in GUI/API:
-
-- `CAN_BUS_1`: `ACTIVE` (or `ERROR` with diagnostic text)
-- `CAN_BUS_2..5`: `OFFLINE`
-
-4. When adding more scopes, assign real serial numbers and enable those buses.
-
-If Pico import fails in Docker, the image now installs `libps2000a` from Pico's apt repository and sets `LD_LIBRARY_PATH=/opt/picoscope/lib`.
-The container also bind-mounts `/dev/bus/usb` and `/run/udev` so Pico's Linux driver can see live USB topology correctly.
-
-## Transfer to Mini PC
-
-1. Copy or clone the CANlogger folder.
-2. Install Docker and Docker Compose plugin.
-3. Run ./start.sh.
-4. Open GUI and verify status.
-
-This gives repeatable setup on any compatible Linux host.
-
-## Implementation Status
-
-- [x] Project scaffold in Documents/CANlogger
-- [x] Configurable 10 ms snapshot cadence (adjustable)
-- [x] 5 parallel stream workers (simulated)
-- [x] Microsecond timestamping
-- [x] Setup GUI for initial deployment
-- [x] Dockerized app + PostgreSQL
-- [x] Real PicoScope API capture implementation
-- [ ] Long-duration endurance tuning with hardware attached
+The install script at `install.sh` pulls the tagged bundle from GitHub releases.
