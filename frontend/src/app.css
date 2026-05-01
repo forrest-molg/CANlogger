@@ -635,6 +635,59 @@ body {
   padding: 0.3rem 0.5rem;
 }
 
+/* ─── Restart badge on stream cards ────────────────────────────────── */
+.restart-badge {
+  margin-left: auto;
+  font-size: 0.65rem;
+  font-family: var(--mono);
+  font-weight: 600;
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: var(--r-sm);
+  padding: 0.15rem 0.45rem;
+  white-space: nowrap;
+}
+
+/* ─── Event log panel ───────────────────────────────────────────────── */
+.event-log-panel {
+  max-height: 260px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.event-log-list {
+  overflow-y: auto;
+  flex: 1;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+}
+
+.event-row {
+  display: grid;
+  grid-template-columns: 5.5rem 7rem 1fr;
+  gap: 0.5rem;
+  align-items: baseline;
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.event-row:last-child { border-bottom: none; }
+
+.event-time {
+  color: var(--text-3);
+}
+
+.event-bus {
+  color: var(--accent-text);
+  font-weight: 500;
+}
+
+.event-restart .event-msg { color: #f59e0b; }
+.event-error   .event-msg { color: var(--danger); }
+.event-recover .event-msg { color: var(--success); }
+
 .app-footer {
   display: flex;
   align-items: center;

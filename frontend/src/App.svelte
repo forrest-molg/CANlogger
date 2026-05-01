@@ -35,6 +35,12 @@
   let dbTestBusy = false;
   let dbTestResult = null; // null | { ok, http_status, latency_ms, error, ingest_url }
 
+  // Event log for dropouts and auto-restarts.
+  let eventLog = []; // { id, time, busName, message, kind: 'restart'|'error'|'recover' }
+  let eventLogIdCounter = 0;
+  let prevRestartCounts = {}; // busName → restart_count
+  let prevStates = {};        // busName → state
+
   const API_TIMEOUT_MS = 10000;
 
   $: statusLabel = running ? "RUNNING" : "IDLE";
@@ -162,7 +168,38 @@
     mode = String(status.mode || "simulator").toUpperCase();
     uptimeS = Number(status.uptime_s || 0);
     storageQueue = Number(status.storage_queue || 0);
-    streams = Array.isArray(status.streams) ? status.streams : [];
+    const newStreams = Array.isArray(status.streams) ? status.streams : [];
+
+    // Detect restarts and error transitions for the event log.
+    for (const stream of newStreams) {
+      const key = stream.bus_name;
+      const prevRestart = prevRestartCounts[key] ?? stream.restart_count ?? 0;
+      const prevState = prevStates[key];
+      const curRestart = stream.restart_count ?? 0;
+      const curState = stream.state;
+
+      if (curRestart > prevRestart) {
+        const n = curRestart;
+        pushEvent(key, `Stream froze — auto-restarted (×${n})`, "restart");
+      } else if (curState === "ERROR" && prevState !== "ERROR") {
+        pushEvent(key, `Error: ${stream.last_error || "unknown"}`, "error");
+      } else if (prevState === "ERROR" && curState === "ACTIVE") {
+        pushEvent(key, "Recovered → ACTIVE", "recover");
+      }
+
+      prevRestartCounts[key] = curRestart;
+      prevStates[key] = curState;
+    }
+
+    streams = newStreams;
+  }
+
+  function pushEvent(busName, message, kind) {
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, "0");
+    const mm = String(now.getMinutes()).padStart(2, "0");
+    const ss = String(now.getSeconds()).padStart(2, "0");
+    eventLog = [{ id: ++eventLogIdCounter, time: `${hh}:${mm}:${ss}`, busName, message, kind }, ...eventLog].slice(0, 200);
   }
 
   async function loadConfig() {
@@ -359,6 +396,9 @@
               <span class="pill-dot"></span>
               {stream.state}
             </span>
+            {#if (stream.restart_count ?? 0) > 0}
+              <span class="restart-badge" title="Stream has been auto-restarted by watchdog">↺ ×{stream.restart_count}</span>
+            {/if}
           </div>
 
           <div class="stream-serial">{stream.device_serial}</div>
@@ -430,6 +470,28 @@
       </div>
     {/if}
   </section>
+
+  {#if eventLog.length > 0}
+    <section class="neo-panel event-log-panel">
+      <div class="panel-header">
+        <Activity class="panel-icon" size={17} />
+        <h2>Event Log</h2>
+        <span class="panel-header-meta">{eventLog.length} event{eventLog.length !== 1 ? "s" : ""}</span>
+        <button class="neo-btn neo-btn-rescan" on:click={() => { eventLog = []; prevRestartCounts = {}; prevStates = {}; }} title="Clear event log">
+          Clear
+        </button>
+      </div>
+      <div class="event-log-list">
+        {#each eventLog as entry (entry.id)}
+          <div class={`event-row event-${entry.kind}`}>
+            <span class="event-time">{entry.time}</span>
+            <span class="event-bus">{entry.busName}</span>
+            <span class="event-msg">{entry.message}</span>
+          </div>
+        {/each}
+      </div>
+    </section>
+  {/if}
 </main>
 
 <footer class="app-footer">

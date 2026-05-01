@@ -38,6 +38,8 @@ class StreamStatus(BaseModel):
     samples_captured: int = 0
     last_window_started_at_us: int | None = None
     last_error: str | None = None
+    restart_count: int = 0
+    last_restart_at_us: int | None = None
 
 
 class RuntimeStatus(BaseModel):

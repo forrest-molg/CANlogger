@@ -68,6 +68,10 @@ class CaptureService:
         self._running = False
         self._started_monotonic: float | None = None
         self._geekom: GeekomAsyncUploader | None = None
+        self._watchdog_task: asyncio.Task[None] | None = None
+        self._last_windows: dict[str, int] = {}   # task_key → windows_captured snapshot
+        self._last_activity: dict[str, float] = {}  # task_key → monotonic time of last new window
+        self._freeze_timeout_s: float = 15.0  # seconds before a frozen stream is restarted
 
     async def start(self, request: StartCaptureRequest | None = None) -> RuntimeStatus:
         logger.info("Capture start requested mode=%s running=%s", self._config.mode, self._running)
@@ -138,11 +142,17 @@ class CaptureService:
                     status.last_error = None
                 logger.info("Capture scope worker started serial=%s channels=%s", serial, channels)
 
+        self._watchdog_task = asyncio.create_task(self._watchdog_loop(), name="capture-watchdog")
         return self.runtime_status()
 
     async def stop(self) -> RuntimeStatus:
         logger.info("Capture stop requested running=%s active_tasks=%s", self._running, len(self._tasks))
         self._running = False
+        if self._watchdog_task is not None:
+            self._watchdog_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._watchdog_task
+            self._watchdog_task = None
         for task_key, task in list(self._tasks.items()):
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -189,6 +199,8 @@ class CaptureService:
                     samples_captured=max((s.samples_captured for s in sts), default=0),
                     last_window_started_at_us=max((s.last_window_started_at_us or 0 for s in sts), default=0) or None,
                     last_error=next((s.last_error for s in sts if s.last_error), None),
+                    restart_count=max((s.restart_count for s in sts), default=0),
+                    last_restart_at_us=max((s.last_restart_at_us or 0 for s in sts), default=0) or None,
                 )
             )
 
@@ -356,6 +368,133 @@ class CaptureService:
             mode=self._config.mode,
             captured_at_us=unix_us_now(),
             streams=results,
+        )
+
+    async def _watchdog_loop(self) -> None:
+        """Monitor active capture tasks for frozen streams and restart them.
+
+        Checks every 5 seconds. If a scope task has not produced any new
+        windows for _freeze_timeout_s seconds while still ACTIVE, the task is
+        cancelled, the device is re-opened, and a fresh capture task is
+        started.  Each recovery increments restart_count on the stream status
+        so the UI can surface it as an event.
+        """
+        CHECK_INTERVAL_S = 5.0
+        logger.debug("Watchdog loop started freeze_timeout=%.0fs", self._freeze_timeout_s)
+        while self._running:
+            await asyncio.sleep(CHECK_INTERVAL_S)
+            if not self._running:
+                break
+            now = time.monotonic()
+            for task_key in list(self._tasks.keys()):
+                if task_key not in self._task_devices:
+                    continue
+                # Determine total windows captured for this scope's devices.
+                device_keys = self._task_devices[task_key]
+                current_windows = max(
+                    (self._status[dk].windows_captured for dk in device_keys if dk in self._status),
+                    default=0,
+                )
+                prev_windows = self._last_windows.get(task_key, -1)
+                if current_windows != prev_windows:
+                    # Progress made — reset watchdog clock.
+                    self._last_windows[task_key] = current_windows
+                    self._last_activity[task_key] = now
+                    continue
+                # No progress — check how long we have been stalled.
+                last_active = self._last_activity.get(task_key)
+                if last_active is None:
+                    # First check with no activity; give it one more cycle.
+                    self._last_windows[task_key] = current_windows
+                    self._last_activity[task_key] = now
+                    continue
+                stall_s = now - last_active
+                if stall_s >= self._freeze_timeout_s:
+                    serial = task_key.removeprefix("scope:")
+                    devices = [
+                        d for d in self._config.devices
+                        if self._device_key(d) in device_keys
+                    ]
+                    logger.warning(
+                        "Watchdog: stream frozen serial=%s stall=%.0fs — restarting",
+                        serial, stall_s,
+                    )
+                    await self._restart_scope(serial, devices, task_key)
+        logger.debug("Watchdog loop exited")
+
+    async def _restart_scope(self, serial: str, devices: list[DeviceConfig], task_key: str) -> None:
+        """Cancel a frozen scope task, close the device, reopen it, and start a new task."""
+        # Cancel the frozen task and wait briefly.
+        task = self._tasks.pop(task_key, None)
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
+        self._task_devices.pop(task_key, None)
+
+        # Mark devices as restarting so the UI shows activity.
+        for device in devices:
+            status = self._status[self._device_key(device)]
+            status.active = False
+            status.state = "IDLE"
+
+        # Close the device (best-effort; underlying thread may still be running).
+        try:
+            await asyncio.to_thread(self._pico_driver.close_device, serial)
+        except Exception as exc:
+            logger.warning("Watchdog: close_device failed serial=%s exc=%s", serial, exc)
+
+        if not self._running:
+            return
+
+        channels = list(dict.fromkeys(d.channel for d in devices))
+        primary = devices[0]
+
+        try:
+            await asyncio.to_thread(
+                self._pico_driver.open_device,
+                primary,
+                self._config.stream.sample_rate_hz,
+                self._config.stream.window_ms,
+                self._config.stream,
+                channels,
+            )
+        except Exception as exc:
+            err_msg = f"Watchdog restart failed: {exc}"
+            logger.error("Watchdog: open_device failed serial=%s exc=%s", serial, exc)
+            for device in devices:
+                status = self._status[self._device_key(device)]
+                status.active = False
+                status.state = "ERROR"
+                status.last_error = err_msg
+                status.restart_count += 1
+                status.last_restart_at_us = unix_us_now()
+            return
+
+        # Start fresh capture task.
+        new_task = asyncio.create_task(
+            self._capture_loop_scope(serial, devices),
+            name=f"capture-scope-{serial}",
+        )
+        self._tasks[task_key] = new_task
+        self._task_devices[task_key] = [self._device_key(d) for d in devices]
+
+        restart_ts = unix_us_now()
+        for device in devices:
+            status = self._status[self._device_key(device)]
+            status.active = True
+            status.state = "ACTIVE"
+            status.last_error = None
+            status.restart_count += 1
+            status.last_restart_at_us = restart_ts
+
+        # Reset watchdog tracking so we don't immediately re-trigger.
+        self._last_windows[task_key] = 0
+        self._last_activity[task_key] = time.monotonic()
+
+        logger.info(
+            "Watchdog: stream restarted serial=%s restart_count=%d",
+            serial, self._status[self._device_key(devices[0])].restart_count,
         )
 
     async def _capture_loop_scope(self, serial: str, devices: list[DeviceConfig]) -> None:
