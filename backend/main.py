@@ -49,6 +49,7 @@ def _probe_and_configure(cfg: AppConfig) -> None:
 
     _MAX_BUSES = 5
     detected: list[str] = []
+    detected_driver_kind: Literal["ps2000a", "ps2000"] | None = None
 
     # --- ps2000a enumerate (preferred: returns serials without opening units) ---
     try:
@@ -61,6 +62,7 @@ def _probe_and_configure(cfg: AppConfig) -> None:
         if status == 0 and int(count.value) > 0:
             raw = serials_buf.value.decode("utf-8", errors="ignore")
             detected = sorted(s.strip() for s in raw.split(",") if s.strip())
+            detected_driver_kind = "ps2000a"
             logger.info("ps2000a enumeration: %d scope(s) found: %s", len(detected), detected)
         else:
             logger.info(
@@ -92,12 +94,19 @@ def _probe_and_configure(cfg: AppConfig) -> None:
             logger.info("No PicoTech USB devices in sysfs — skipping ps2000 probe")
         else:
             try:
+                import time as _time
                 from picosdk.ps2000 import ps2000 as ps_legacy  # type: ignore
+
+                # Give the USB device time to finish firmware loading after enumeration.
+                # Without this, ps2000_open_unit() can return -1 immediately if called
+                # within ~2s of the device appearing in sysfs (e.g. hot-plug during run).
+                _time.sleep(2.0)
 
                 handles: list[tuple[ctypes.c_int16, str]] = []
                 for slot in range(min(pico_usb_count, _MAX_BUSES)):
                     handle_val = int(ps_legacy.ps2000_open_unit())
                     if handle_val <= 0:
+                        logger.warning("ps2000_open_unit returned %d for slot %d", handle_val, slot)
                         break  # no more scopes available
                     handle = ctypes.c_int16(handle_val)
                     # info type 4 = BATCH_AND_SERIAL (e.g. "12451/0401")
@@ -114,6 +123,7 @@ def _probe_and_configure(cfg: AppConfig) -> None:
 
                 detected = sorted(serial for _, serial in handles)
                 if detected:
+                    detected_driver_kind = "ps2000"
                     logger.info("ps2000 fallback enumeration: %d scope(s) found: %s", len(detected), detected)
                 else:
                     logger.warning("ps2000 fallback found no scopes despite %d USB device(s) — all buses will be OFFLINE", pico_usb_count)
@@ -126,8 +136,8 @@ def _probe_and_configure(cfg: AppConfig) -> None:
         bus_name = f"CAN_BUS_{slot + 1}"
         if slot < len(detected):
             serial = detected[slot]
-            new_devices.append(DeviceConfig(bus_name=bus_name, serial=serial, channel="A", enabled=True))
-            new_devices.append(DeviceConfig(bus_name=bus_name, serial=serial, channel="B", enabled=True))
+            new_devices.append(DeviceConfig(bus_name=bus_name, serial=serial, channel="A", enabled=True, driver_kind=detected_driver_kind))
+            new_devices.append(DeviceConfig(bus_name=bus_name, serial=serial, channel="B", enabled=True, driver_kind=detected_driver_kind))
         else:
             new_devices.append(DeviceConfig(bus_name=bus_name, serial=f"OFFLINE-{slot + 1:03d}", channel="A", enabled=False))
 

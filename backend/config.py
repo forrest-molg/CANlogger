@@ -32,6 +32,9 @@ class DeviceConfig(BaseModel):
     serial: str
     channel: Literal["A", "B"] = "A"
     enabled: bool = True
+    # Set by the startup probe so open_device() can skip the wrong driver entirely.
+    # None means "auto-detect" (try ps2000a first, fall back to ps2000).
+    driver_kind: Literal["ps2000a", "ps2000"] | None = None
 
 
 class StorageSettings(BaseModel):

@@ -300,6 +300,12 @@ class PicoScope2204ADriver:
         ps2000a_error: RuntimeError | None = None
 
         try:
+            # Skip ps2000a if startup probe already identified this as a legacy ps2000 device.
+            # ps2000aOpenUnit on a ps2000 device claims the USB interface but may not release
+            # it cleanly on failure, leaving the device locked so ps2000_open_unit returns 0.
+            if getattr(device, "driver_kind", None) == "ps2000":
+                logger.debug("Skipping ps2000a attempt for serial=%s (driver_kind=ps2000)", device.serial)
+                raise RuntimeError("ps2000aOpenUnit failed with Pico status code 3 (skipped — known ps2000 device)")
             ps = self._load_sdk("ps2000a")
             handle = ctypes.c_int16()
             serial_hint = None if device.serial.upper() == "AUTO" else device.serial.encode("utf-8")

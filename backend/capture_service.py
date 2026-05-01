@@ -263,6 +263,11 @@ class CaptureService:
             for device in enabled_devices:
                 devices_by_serial.setdefault(device.serial, []).append(device)
 
+            # Snapshots use block mode (streaming_mode=False) regardless of config.
+            # ps2000 streaming mode requires extra cleanup time after close, which causes
+            # ps2000_open_unit to return 0 on the next snapshot if called too soon.
+            snapshot_stream = self._config.stream.model_copy(update={"streaming_mode": False})
+
             for serial, serial_devices in devices_by_serial.items():
                 channels = list(dict.fromkeys(d.channel for d in serial_devices))
                 primary = serial_devices[0]
@@ -278,7 +283,7 @@ class CaptureService:
                         primary,
                         self._config.stream.sample_rate_hz,
                         self._config.stream.window_ms,
-                        self._config.stream,
+                        snapshot_stream,
                         channels,
                     )
                     try:
